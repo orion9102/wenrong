@@ -207,3 +207,24 @@ a.btn-link:focus-visible, button:focus-visible { outline: 2px solid var(--peach-
 }
 .docs code { background: var(--peach-soft); padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, monospace; font-size: 12.5px; }
 .docs table { margin-top: 8px; }
+
+/* 分页控件 */
+.pager { display: flex; align-items: center; gap: 6px; margin-top: 16px; flex-wrap: wrap; }
+.pager .pager-btn {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  min-width: 34px;
+}
+.pager .pager-btn:hover:not(:disabled) { background: var(--peach-soft); border-color: var(--peach); }
+.pager .pager-btn.pager-current {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 500;
+}
+.pager .pager-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.pager select { width: auto; margin-bottom: 0; padding: 6px 8px; }

@@ -1,8 +1,10 @@
 # 文镕（WenRong）— 通用翻译润色服务
 
-产品设计文档 v1.0
-日期：2026-10-26
+产品设计文档 v1.1（与 v1.1.0 已上线实现对齐）
+日期：2026-10-26（v1.0）/ 2026-10-26 更新（v1.1）
 作者：烛龙（AI 助理，代用户 feng 撰写）
+
+> v1.1 变更摘要：技术选型从 Express+React 改为零依赖 node:http + 原生 DOM 前端；管理台登录改为统一账号中心 acc（OAuth PKCE）；新增 OpenAPI 文档端点、Scalar 在线文档页、幂等、限流响应头、温度/术语表/目标语言等可选字段、构建标识（version+commit）；外部访问经 Cloudflare 隧道 https://wr.909939.xyz。流式/异步/批量另见 docs/ASYNC_API_DESIGN.md（未实现）。
 
 ---
 
@@ -32,7 +34,7 @@
 - 不做多语言 i18n 的 Web 界面（后台默认中文即可）。
 - 不做用户体系/多租户隔离（本期是内部工具，默认单租户，用简单的 API Key 做访问控制）。
 - 不做文件级别的批量翻译（如上传 Word/PDF），本期只做文本字符串级别的同步 API。
-- 不做流式输出（streaming），本期用同步请求-响应模式，这样对接简单，后续如有长文本场景再考虑加流式。
+- 不做流式输出（streaming），本期用同步请求-响应模式，这样对接简单，后续如有长文本场景再考虑加流式（设计稿见 docs/ASYNC_API_DESIGN.md，尚未实现）。
 
 ---
 
@@ -86,14 +88,16 @@
 
 ### 3.1 技术选型
 
-| 模块 | 选型 | 理由 |
+| 模块 | 实际选型（v1.1） | 理由 |
 |---|---|---|
-| 后端语言/运行时 | Node.js (TypeScript) + Express | 和工作区现有项目技术栈一致，异步 I/O 适合转发 LLM 请求 |
-| 数据库 | SQLite（better-sqlite3） | 单机部署，数据量小（配置+日志），免运维，备份就是复制文件 |
-| 前端 | React + Vite，纯静态构建后由后端 Express 托管 | 轻量，无需额外部署前端服务 |
-| LLM 客户端 | 自封装的 OpenAI 兼容客户端（axios/fetch） | 目标服务是 OpenAI 兼容接口，加一层适配方便以后挂多供应商 |
-| 部署 | Docker + docker-compose | 与工作区现有项目（60s、adintel 等）保持一致的"一条命令跑通"习惯 |
-| 进程管理 | Docker 内置重启策略 + 健康检查 | 简化运维 |
+| 后端语言/运行时 | Node.js ≥22（CommonJS）+ node:http，**零 npm 运行时依赖** | 单文件服务、镜像小、无供应链负担；node:22 内置 fetch/http 能力足够 |
+| 数据库 | SQLite（node:sqlite 内置模块，WAL 模式） | 单机部署，数据量小（配置+日志），免运维，备份就是复制文件；不引 better-sqlite3 保持零依赖 |
+| 前端 | 原生 DOM（无框架）单页应用 app.js + style.css，由后端 node:http 直接托管 | 管理台规模小（7 个页面），不值得引入构建链；样式为蜜桃抹茶主题，静态资源带版本号防缓存 |
+| LLM 客户端 | 自封装 OpenAI 兼容客户端（node:http + fetch） | 目标服务是 OpenAI 兼容接口，含超时、重试、429/5xx 分类映射 |
+| 鉴权 | 业务 API：Bearer API Key（sha256+salt 哈希存储）；管理台：统一账号中心 acc.909939.xyz（OAuth 2.0 授权码 + PKCE，RS256 JWKS 验签） | 复用工作区统一账号中心，无本地账号密码；两套鉴权完全隔离 |
+| 部署 | Docker + docker compose，部署于 s47（192.168.88.47:4090） | 与工作区惯例一致；镜像构建时注入 git commit（build-commit.txt） |
+| 对外暴露 | Cloudflare 隧道 → https://wr.909939.xyz（OAuth 回调地址已登记） | 内网直连与公网域名都可访问；管理台与文档页走域名，业务 API 供内网/公网后端调用 |
+| 进程管理 | Docker restart=unless-stopped + healthcheck（/healthz） | 简化运维 |
 
 ---
 
@@ -113,9 +117,17 @@ Authorization: Bearer <API_KEY>
 {
   "text": "This is a sample paragraph that needs polishing and translation.",
   "prompt": "可选，调用方自定义指令。不传则使用系统默认的『润色并翻译为中文』提示词",
-  "providerId": "可选，指定使用哪个已配置的 LLM 供应商，不传则用默认供应商"
+  "providerId": "可选，指定使用哪个已配置的 LLM 供应商，不传则用默认供应商",
+  "instruction": "可选，附加要求（≤1000 字），叠加在提示词之后，不替换默认行为",
+  "targetLang": "可选，目标语言，默认 zh；可选 zh/zh-Hant/en/ja/ko/fr/de/es/pt/it/ru/vi/th/ar",
+  "glossary": "可选，术语表 {"原文":"译法"}，最多 100 条，每条 ≤100 字符",
+  "temperature": "可选，0～1，默认 0.2；透传上游，不保证确定性输出"
 }
 ```
+
+可选请求头：
+- `Idempotency-Key`（8～128 位）：同一 Key 同一内容 24 小时内回放响应；同 Key 不同内容返回 409。
+- `X-Request-Id`（8～80 位）：调用方请求 ID，原样作为 requestId 返回。
 
 **响应体（成功）**：
 
@@ -125,17 +137,21 @@ Authorization: Bearer <API_KEY>
   "data": {
     "result": "这是一段需要润色和翻译的示例段落。",
     "usedPrompt": "default_translate_polish",
-    "model": "gpt-4o-mini",
-    "usage": {
-      "promptTokens": 42,
-      "completionTokens": 18,
-      "totalTokens": 60
-    },
-    "latencyMs": 820
+    "promptVersion": "pv_3f9a1c2b7d4e",
+    "detectedLang": "en",
+    "targetLang": "zh",
+    "model": "claude-sonnet-4-5",
+    "usage": { "promptTokens": 42, "completionTokens": 18, "totalTokens": 60 },
+    "latencyMs": 820,
+    "upstreamMs": 780
   },
   "requestId": "req_7f3a9c2e"
 }
 ```
+
+说明：`promptVersion` 是实际生效提示词（system + user）的指纹，后台改提示词后即变，用于对账与复现；`latencyMs` 为总耗时，`upstreamMs` 为其中上游 LLM 调用耗时，两者之差即本服务自身开销；幂等回放时额外带 `idempotentReplay: true`。
+
+响应头：`X-Request-Id`、`X-RateLimit-Limit`、`X-RateLimit-Remaining`、`X-RateLimit-Reset`（距窗口重置剩余秒数，真实倒数）；429/503 另带 `Retry-After`。
 
 **响应体（失败）**：
 
@@ -154,13 +170,19 @@ Authorization: Bearer <API_KEY>
 
 | code | HTTP 状态 | 说明 |
 |---|---|---|
-| `INVALID_REQUEST` | 400 | 请求体缺少 `text` 或格式不对 |
+| `INVALID_REQUEST` | 400 | 请求体缺少 `text` 或可选字段格式不对（带 `field` 指明问题字段） |
+| `MALFORMED_JSON` | 400 | 请求体不是合法 JSON |
 | `UNAUTHORIZED` | 401 | API Key 缺失或无效 |
-| `TEXT_TOO_LONG` | 413 | 文本超过配置的最大长度限制 |
 | `PROVIDER_NOT_FOUND` | 400 | 指定的 `providerId` 不存在或未启用 |
-| `LLM_UPSTREAM_ERROR` | 502 | 上游 LLM 服务调用失败（鉴权、网络、超时等） |
-| `RATE_LIMITED` | 429 | 触发限流 |
+| `IDEMPOTENCY_CONFLICT` | 409 | 同一 Idempotency-Key 用于不同请求内容 |
+| `TEXT_TOO_LONG` | 413 | 文本超过字符上限或估算 token 上限（带 `limit`/`actualLength`/`unit`） |
+| `BODY_TOO_LARGE` | 413 | 请求体超过 2 MB |
+| `RATE_LIMITED` | 429 | 本服务限流（滑动窗口，默认 60 次/分钟/API Key） |
+| `UPSTREAM_RATE_LIMITED` | 429 | 上游 LLM 限流（透传，带 Retry-After） |
+| `LLM_UPSTREAM_ERROR` | 502/503 | 上游 LLM 调用失败（鉴权、网络、超时等；`retryable` 标明是否值得重试） |
 | `INTERNAL_ERROR` | 500 | 服务内部异常 |
+
+机器可读契约：`GET /api/v1/openapi.json`（OpenAPI 3.0，无需鉴权）；在线文档页：`GET /api/v1/docs`（Scalar 渲染，脚本已本地打包，离线可用）。
 
 ### 4.2 健康检查接口
 
@@ -168,27 +190,34 @@ Authorization: Bearer <API_KEY>
 GET /api/v1/health
 ```
 
-返回服务自身状态和当前默认供应商的连通性：
+返回服务自身状态、版本与构建标识、默认供应商状态：
 
 ```json
 {
   "status": "ok",
+  "version": "1.1.0",
+  "commit": "bd5a4ef",
   "uptime": 123456,
-  "defaultProvider": { "id": "wan8", "reachable": true }
+  "defaultProvider": { "id": "default", "name": "默认 LLM 供应商", "enabled": true }
 }
 ```
+
+`version` 来自 package.json，`commit` 为镜像构建时注入的 git 短 hash（build-commit.txt 随镜像分发），用于判断线上跑的是哪次构建。另有 `GET /healthz`（容器健康检查，恒 `{"ok":true}`）和 `GET /readyz`（就绪探针：数据库可读且默认供应商已启用并配了 Key 才 200，不打上游、不产生费用）。
 
 ### 4.3 管理后台 API（需管理员登录）
 
 管理台接口统一挂在 `/api/admin/*`，登录由统一账号中心 acc.909939.xyz 完成（OAuth 2.0 授权码 + PKCE，`/api/auth/login`、`/api/auth/callback`），登录后使用本地会话 cookie，和业务 API 的 API Key 鉴权分开（2026-10-26 起取代本地账号密码登录；管理台页面从 `/admin` 迁到根路径 `/`）：
 
 - `GET/PUT /api/admin/prompts` — 查看/更新系统提示词与默认用户提示词
+- `GET/PUT /api/admin/prompts` — 查看/更新系统提示词与默认用户提示词
 - `GET/POST/PUT/DELETE /api/admin/providers` — LLM 供应商的增删改查
 - `POST /api/admin/providers/:id/test` — 测试供应商连通性（发一个最小请求验证 key 和地址可用）
 - `GET /api/admin/logs` — 分页查询调用日志，支持按时间、状态、供应商筛选
 - `GET /api/admin/metrics` — 聚合统计（今日调用量、成功率、平均延迟、Token 消耗趋势）
 - `GET/POST /api/admin/api-keys` — 管理业务调用方的 API Key（生成、吊销、重命名）
-- `POST /api/admin/login` / `POST /api/admin/logout` — 后台登录
+- `POST /api/auth/logout` / `GET /api/auth/me` — 登出与当前会话信息
+
+> 历史备注：本地账号密码登录（admin_users/admin_sessions 表）已被统一账号中心登录取代，表结构保留但不再使用。
 
 ---
 

@@ -659,33 +659,97 @@ async function renderLogs(main) {
   main.innerHTML = '';
   main.appendChild(el('h1', {}, '调用日志'));
 
+  // 分页状态（默认 20 条/页，可切 10/20/50/100）
+  if (!state.logsPage) state.logsPage = { page: 1, pageSize: 20, total: 0 };
+  const pg = state.logsPage;
+
   const listCard = el('div', { class: 'card' }, '加载中…');
   main.appendChild(listCard);
 
-  const res = await api('/logs?limit=50');
-  const logs = res.data || [];
-  const pagination = res.pagination || { total: logs.length };
-  listCard.innerHTML = '';
-  listCard.appendChild(el('h2', {}, `最近 ${logs.length} 条（共 ${pagination.total} 条）`));
-  const table = el('table', {}, [
-    el('thead', {}, el('tr', {}, [el('th', {}, '时间'), el('th', {}, '供应商'), el('th', {}, 'Prompt'), el('th', {}, '状态'), el('th', {}, '延迟'), el('th', {}, 'Token'), el('th', {}, '错误')])),
-    el(
-      'tbody',
-      {},
-      logs.map((l) =>
-        el('tr', {}, [
-          el('td', {}, fmtTime(l.created_at)),
-          el('td', { class: 'mono' }, l.provider_id),
-          el('td', {}, l.used_prompt === 'custom' ? '自定义' : '默认'),
-          el('td', {}, el('span', { class: 'badge ' + (l.status === 'success' ? 'success' : 'error') }, l.status === 'success' ? '成功' : '失败')),
-          el('td', {}, l.latency_ms ? l.latency_ms + 'ms' : '-'),
-          el('td', {}, l.total_tokens || '-'),
-          el('td', { class: 'muted' }, l.error_message || '-')
-        ])
-      )
-    )
-  ]);
-  listCard.appendChild(table);
+  const load = async () => {
+    listCard.innerHTML = '加载中…';
+    try {
+      const res = await api(`/logs?limit=${pg.pageSize}&offset=${(pg.page - 1) * pg.pageSize}`);
+      const logs = res.data || [];
+      pg.total = (res.pagination && res.pagination.total) || logs.length;
+      const totalPages = Math.max(1, Math.ceil(pg.total / pg.pageSize));
+      if (pg.page > totalPages) pg.page = totalPages;
+      const pageStart = pg.total === 0 ? 0 : (pg.page - 1) * pg.pageSize + 1;
+      const pageEnd = Math.min(pg.page * pg.pageSize, pg.total);
+
+      listCard.innerHTML = '';
+      listCard.appendChild(el('h2', {}, `第 ${pageStart}–${pageEnd} 条，共 ${pg.total} 条`));
+
+      if (logs.length === 0) {
+        listCard.appendChild(el('p', { class: 'muted' }, '暂无日志记录'));
+        return;
+      }
+
+      const table = el('table', {}, [
+        el('thead', {}, el('tr', {}, [el('th', {}, '时间'), el('th', {}, '供应商'), el('th', {}, 'Prompt'), el('th', {}, '状态'), el('th', {}, '延迟'), el('th', {}, 'Token'), el('th', {}, '错误')])),
+        el(
+          'tbody',
+          {},
+          logs.map((l) =>
+            el('tr', {}, [
+              el('td', {}, fmtTime(l.created_at)),
+              el('td', { class: 'mono' }, l.provider_id),
+              el('td', {}, l.used_prompt === 'custom' ? '自定义' : '默认'),
+              el('td', {}, el('span', { class: 'badge ' + (l.status === 'success' ? 'success' : 'error') }, l.status === 'success' ? '成功' : '失败')),
+              el('td', {}, l.latency_ms ? l.latency_ms + 'ms' : '-'),
+              el('td', {}, l.total_tokens || '-'),
+              el('td', { class: 'muted' }, l.error_message || '-')
+            ])
+          )
+        )
+      ]);
+      listCard.appendChild(table);
+
+      // ---- 分页控件 ----
+      const nav = el('div', { class: 'pager' });
+      const btn = (label, targetPage, disabled, ariaLabel) => {
+        const b = el('button', {
+          class: 'pager-btn',
+          'aria-label': ariaLabel || label,
+          onclick: disabled ? undefined : () => { pg.page = targetPage; load(); }
+        }, label);
+        if (disabled) b.disabled = true;
+        return b;
+      };
+
+      nav.appendChild(btn('«', 1, pg.page === 1, '首页'));
+      nav.appendChild(btn('‹', pg.page - 1, pg.page === 1, '上一页'));
+
+      // 页码窗口：最多显示 5 个，当前页居中
+      const windowStart = Math.max(1, Math.min(pg.page - 2, totalPages - 4));
+      const windowEnd = Math.min(totalPages, windowStart + 4);
+      for (let i = windowStart; i <= windowEnd; i++) {
+        const b = btn(String(i), i, i === pg.page, `第 ${i} 页`);
+        if (i === pg.page) b.classList.add('pager-current');
+        nav.appendChild(b);
+      }
+
+      nav.appendChild(btn('›', pg.page + 1, pg.page === totalPages, '下一页'));
+      nav.appendChild(btn('»', totalPages, pg.page === totalPages, '末页'));
+
+      // 每页条数选择
+      const sizeSel = el('select', { onchange: () => { pg.pageSize = Number(sizeSel.value); pg.page = 1; load(); } },
+        [10, 20, 50, 100].map((n) => {
+          const o = el('option', { value: String(n) }, n + ' 条/页');
+          if (n === pg.pageSize) o.selected = true;
+          return o;
+        })
+      );
+      nav.appendChild(sizeSel);
+
+      listCard.appendChild(nav);
+    } catch (err) {
+      listCard.innerHTML = '';
+      listCard.appendChild(el('p', { class: 'muted' }, '加载失败：' + err.message));
+    }
+  };
+
+  await load();
 }
 
 const initialRoute = location.hash.replace(/^#/, '');
