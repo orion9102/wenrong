@@ -1,13 +1,13 @@
 :root {
-  --bg: #0f1115;
-  --panel: #171a21;
-  --panel-border: #2a2e39;
-  --text: #e6e8ec;
-  --muted: #8b90a0;
-  --accent: #4f8cff;
-  --accent-hover: #3f78e8;
-  --danger: #e5484d;
-  --success: #3fb950;
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --panel-border: #e2e5ea;
+  --text: #1f2329;
+  --muted: #6b7280;
+  --accent: #2f6bff;
+  --accent-hover: #2456d6;
+  --danger: #d93036;
+  --success: #1a9e44;
   --radius: 8px;
 }
 
@@ -50,8 +50,8 @@ body {
   cursor: pointer;
   border-left: 3px solid transparent;
 }
-.sidebar nav a:hover { background: #1d212b; }
-.sidebar nav a.active { border-left-color: var(--accent); background: #1d212b; color: var(--accent); }
+.sidebar nav a:hover { background: #eef1f6; }
+.sidebar nav a.active { border-left-color: var(--accent); background: #e8efff; color: var(--accent); }
 
 .sidebar .logout {
   position: absolute;
@@ -82,7 +82,7 @@ body {
 label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; }
 input[type=text], input[type=password], input[type=number], textarea, select {
   width: 100%;
-  background: #0f1115;
+  background: #ffffff;
   border: 1px solid var(--panel-border);
   border-radius: 6px;
   color: var(--text);
@@ -104,8 +104,8 @@ button {
   cursor: pointer;
 }
 button:hover { background: var(--accent-hover); }
-button.secondary { background: #2a2e39; }
-button.secondary:hover { background: #363b49; }
+button.secondary { background: #e8eaee; color: var(--text); }
+button.secondary:hover { background: #dcDFe5; }
 button.danger { background: var(--danger); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 
@@ -114,21 +114,22 @@ table th, table td { text-align: left; padding: 8px 10px; border-bottom: 1px sol
 table th { color: var(--muted); font-weight: 500; }
 
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
-.badge.success { background: rgba(63,185,80,0.15); color: var(--success); }
-.badge.error { background: rgba(229,72,77,0.15); color: var(--danger); }
-.badge.default { background: rgba(79,140,255,0.15); color: var(--accent); }
-.badge.disabled { background: rgba(139,144,160,0.15); color: var(--muted); }
+.badge.success { background: rgba(26,158,68,0.12); color: var(--success); }
+.badge.error { background: rgba(217,48,54,0.12); color: var(--danger); }
+.badge.default { background: rgba(47,107,255,0.12); color: var(--accent); }
+.badge.disabled { background: rgba(107,114,128,0.12); color: var(--muted); }
 
 .toast {
   position: fixed; top: 20px; right: 20px; padding: 12px 18px;
   background: var(--panel); border: 1px solid var(--panel-border); border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(31,35,41,0.08);
   z-index: 999;
 }
 .toast.success { border-color: var(--success); }
 .toast.error { border-color: var(--danger); }
 
 .login-wrap { display: flex; align-items: center; justify-content: center; height: 100vh; width: 100%; }
-.login-box { width: 340px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius); padding: 32px; }
+.login-box { width: 340px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius); padding: 32px; box-shadow: 0 6px 24px rgba(31,35,41,0.06); }
 .login-box h1 { margin: 0 0 4px; font-size: 20px; }
 .login-box p { color: var(--muted); font-size: 12px; margin: 0 0 24px; }
 .login-box .error { color: var(--danger); font-size: 12px; margin: -6px 0 14px; }
@@ -138,4 +139,4 @@ table th { color: var(--muted); font-weight: 500; }
 .muted { color: var(--muted); }
 .mono { font-family: ui-monospace, monospace; }
 .mt-10 { margin-top: 10px; }
-.key-reveal { background: #0f1115; border: 1px solid var(--success); border-radius: 6px; padding: 12px; margin-top: 10px; word-break: break-all; }
+.key-reveal { background: #f8f9fb; border: 1px solid var(--success); border-radius: 6px; padding: 12px; margin-top: 10px; word-break: break-all; }
