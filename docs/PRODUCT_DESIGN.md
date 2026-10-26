@@ -366,19 +366,43 @@ CREATE TABLE request_logs (
   created_at INTEGER NOT NULL
 );
 
--- 后台管理员账号
+-- 后台管理员账号（历史遗留：已被统一账号中心登录取代，不再使用）
 CREATE TABLE admin_users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+
+-- 幂等缓存（Idempotency-Key 回放）
+CREATE TABLE idempotency (
+  key TEXT NOT NULL,
+  api_key_id TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,        -- 请求内容指纹，冲突检测用
+  status INTEGER NOT NULL,
+  response_json TEXT NOT NULL,      -- 完整响应体缓存
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,      -- 24 小时
+  PRIMARY KEY (key, api_key_id)
+);
+
+-- 统一账号中心（acc）登录后的本地会话；token 仅存 sha256
+CREATE TABLE user_sessions (
+  token_hash TEXT PRIMARY KEY,
+  sub TEXT NOT NULL,
+  email TEXT,
+  name TEXT,
+  role TEXT,                        -- admin / user，管理台要求 admin
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL       -- 7 天
+);
 ```
 
 说明：
 - 输入/输出的**原文全文不落库**，只记录长度和元信息，避免敏感文本长期堆积、也减少存储压力；如后续需要全文留痕用于排查，可以加一个开关单独控制（默认关闭）。
-- `api_key_encrypted` 用 AES-256-GCM 加密存储，密钥来自环境变量（部署时配置，不入库不入代码）。
-- `key_hash` 用 bcrypt 或 sha256+salt，业务方的 API Key 本身只在创建时完整展示一次。
+- `api_key_encrypted` 用 AES-256-GCM 加密存储，密钥来自环境变量 `ENCRYPTION_KEY`（部署时配置，不入库不入代码）。
+- `key_hash` 用 sha256+salt，业务方的 API Key 本身只在创建时完整展示一次。
+- `admin_users`/`admin_sessions` 为本地账号密码时代的历史表，2026-10-26 起管理台登录走统一账号中心，这两张表保留但不再写入。
 
 ---
 
@@ -386,7 +410,7 @@ CREATE TABLE admin_users (
 
 ### 8.1 页面结构
 
-1. **登录页**：用户名+密码登录（admin_users 表），会话用 httpOnly cookie。
+1. **登录页**：跳转统一账号中心 acc.909939.xyz 登录（OAuth 授权码 + PKCE，仅 admin 角色可进），回调后签发本地 httpOnly 会话 cookie（7 天，SameSite=Lax）。
 2. **概览页（Dashboard）**
    - 今日/近7日调用量趋势图
    - 成功率、平均延迟、Token 消耗统计卡片
@@ -406,24 +430,28 @@ CREATE TABLE admin_users (
    - 新增 Key（生成后仅展示一次完整 key，提示用户立即保存）
    - 吊销/启用 Key
 6. **调用日志页**
-   - 分页表格：时间、调用方（API Key 标签）、供应商、使用的 Prompt 类型、状态、延迟、Token 数
-   - 按时间范围/状态/供应商筛选
-   - 点击行可展开查看错误详情（如有）
+   - 分页表格：时间、供应商、使用的 Prompt 类型、状态、延迟、Token 数、错误信息
+   - 完整分页控件：首页/上一页/页码窗口（5 页）/下一页/末页 + 每页条数切换（10/20/50/100）
+   - 后端支持 limit（≤200）/offset/status/providerId/since 参数
+7. **Playground 页**：管理台内直接试调 /api/v1/process（选 Key、传文本，看实时结果与耗时）
+8. **文档页**：内嵌本服务的 API 说明（错误码、响应头、重试策略）
 
 ### 8.2 UI 技术与风格
 
-- React + Vite + 一套轻量组件库（如 shadcn/ui 或 Ant Design，待开发阶段确认，默认倾向 Ant Design 因为表格/表单组件成熟，适合管理后台）。
-- 构建后的静态文件由 Express 直接托管在 `/admin` 路径下，不单独起前端服务，降低部署复杂度。
+- 原生 JavaScript（零框架、零构建）单文件应用 `web/admin/app.js`，由后端 node:http 直接托管在根路径 `/`。
+- 视觉风格：蜜桃抹茶主题（抹茶绿 `#7a9a54` 主色 × 蜜桃粉 `#f2a48c` 辅助 × 奶油米底），圆角卡片 + 柔和阴影。
+- 静态资源引用带版本号（`?v=x.y.z`），避免更新后浏览器缓存不刷新。
 
 ---
 
 ## 9. 安全设计
 
 - **业务 API 鉴权**：`Authorization: Bearer <API_KEY>`，Key 以哈希形式存储比对，支持单独吊销。
-- **管理后台鉴权**：独立账号密码体系，session cookie（httpOnly + secure，生产环境强制 HTTPS 或限制在内网访问）。
+- **管理后台鉴权**：统一账号中心 acc.909939.xyz（OAuth 2.0 授权码 + PKCE 公共客户端，RS256 id_token 验签，仅 admin 角色放行），本地会话 cookie 为 httpOnly + SameSite=Lax，7 天有效。
 - **供应商密钥保护**：API Key 加密存储，日志和列表接口永远只返回掩码（如 `sk-***abcd`），不提供"查看完整密钥"的接口，只能重新编辑覆盖。
-- **网络暴露范围**：本服务设计为内网服务（部署在局域网内，供内部项目调用），默认不建议直接暴露到公网。如需公网访问，必须加反向代理+限流+强密码策略，并在部署文档中明确标注这个风险。
-- **限流**：业务 API 按 API Key 做简单的滑动窗口限流（如每分钟 N 次），防止单个调用方异常重试打满上游 LLM 配额。
+- **网络暴露范围**：内网（s47:4090）与公网域名（https://wr.909939.xyz，经 Cloudflare 隧道）双通道。业务 API 始终要求 Bearer Key；管理台要求 acc admin 角色；openapi.json/docs 页为公开只读契约，不泄露密钥信息。
+- **限流**：业务 API 按 API Key 滑动窗口限流（默认 60 次/分钟），响应带 X-RateLimit-* 头（Reset 为真实倒数秒数）；上游 429 透传并附 Retry-After。
+- **幂等**：Idempotency-Key 支持安全重试（24h 回放，内容冲突 409），应对网络抖动下的重复提交。
 - **输入校验**：`text` 长度上限可配置（默认 20000 字符），超限直接拒绝，避免单次请求消耗过多 Token 或拖垂上游。
 
 > 安全提示：本服务一旦启动即对外提供 HTTP API，必须配置 API Key 鉴权才可用；管理后台同样需要账号密码才能访问。部署时请确认不要在没有鉴权的情况下暴露到公网。
@@ -432,22 +460,32 @@ CREATE TABLE admin_users (
 
 ## 10. 部署设计
 
-### 10.1 目录结构
+### 10.1 目录结构（实际）
 
 ```
 wenrong/
 ├── docs/
-│   └── PRODUCT_DESIGN.md       # 本文档
-├── server/                     # 后端服务（Node.js + TypeScript）
-│   ├── src/
-│   ├── package.json
-│   └── Dockerfile
-├── web/                        # 管理后台前端（React + Vite）
-│   ├── src/
-│   └── package.json
-├── config/
-│   └── .env.example            # 环境变量示例（不含真实密钥）
+│   ├── PRODUCT_DESIGN.md       # 本文档
+│   └── ASYNC_API_DESIGN.md     # 流式/异步/批量接口设计稿（未实现）
+├── src/                        # 后端服务（Node.js，零依赖）
+│   ├── server.js               # 入口：路由、业务 API、静态托管
+│   ├── admin-routes.js         # 管理台与 auth 路由
+│   ├── acc-auth.js             # 统一账号中心 OAuth PKCE + JWKS 验签
+│   ├── admin-auth.js           # 管理台会话
+│   ├── store.js                # SQLite 数据层（node:sqlite）
+│   ├── llm-client.js           # OpenAI 兼容上游客户端（超时/重试/错误映射）
+│   ├── prompt-engine.js        # 提示词合并与可选字段校验
+│   ├── rate-limiter.js         # 滑动窗口限流
+│   ├── text-policy.js          # 括注清理、token 估算、语言粗判
+│   └── crypto.js               # AES-GCM 加密、API Key 哈希
+├── web/admin/                  # 管理后台前端（原生 JS，无构建）
+│   ├── index.html / app.js / style.css
+│   └── vendor/scalar-standalone.js   # Scalar 文档渲染器（本地打包，离线可用）
+├── tests/                      # node:test 测试（44 个用例）
+├── scripts/syntax-check.js
+├── Dockerfile                  # node:24-alpine，非 root 运行
 ├── docker-compose.yml
+├── config/.env.example
 └── README.md
 ```
 
@@ -455,14 +493,18 @@ wenrong/
 
 ```
 PORT=4090
-DATA_DIR=/data                  # SQLite 文件存放目录（Docker volume 挂载）
-ENCRYPTION_KEY=<32字节随机密钥>   # 用于加密供应商 API Key
-ADMIN_SESSION_SECRET=<随机密钥>  # 后台 session 签名密钥
+WENRONG_DB=/app/data/wenrong.sqlite   # SQLite 路径（Docker volume 持久化）
+ENCRYPTION_KEY=<64位hex>              # 用于加密供应商 API Key
 DEFAULT_PROVIDER_BASE_URL=http://192.168.88.62:3001/
-DEFAULT_PROVIDER_MODEL=gpt-4o-mini
+DEFAULT_PROVIDER_MODEL=auto
+DEFAULT_PROVIDER_API_KEY=<首启建默认供应商用，留空则后台填>
+ACC_BASE=https://acc.909939.xyz       # 统一账号中心
+ACC_CLIENT_ID=app_01M5VR4AFT7EV89TMMWZGXRMQY
+ACC_REDIRECT_URI=https://wr.909939.xyz/api/auth/callback
+ACC_REQUIRED_ROLE=admin
 ```
 
-`ENCRYPTION_KEY` 和 `ADMIN_SESSION_SECRET` 首次部署时随机生成，写入 `.env`（不提交到 git）。
+`ENCRYPTION_KEY` 首次部署时随机生成，写入 `.env`（不提交到 git；改动会导致已存供应商 Key 无法解密）。
 
 ### 10.3 一条命令跑通
 
@@ -471,30 +513,39 @@ docker compose up -d
 ```
 
 启动后：
-- 业务 API: `http://<host>:4090/api/v1/process`
-- 管理后台: `http://<host>:4090/admin`
-- 首次启动自动初始化 SQLite 表结构，并提示在后台创建首个管理员账号。
+- 业务 API: `http://<host>:4090/api/v1/process`（内网）或 `https://wr.909939.xyz/api/v1/process`
+- 管理后台: `http://<host>:4090/`（内网）或 <https://wr.909939.xyz/>
+- 在线 API 文档: `https://wr.909939.xyz/api/v1/docs`（Scalar）
+- 首次启动自动初始化 SQLite 表结构；登录走统一账号中心，无本地账号创建步骤。
+- 实际部署：s47（192.168.88.47:4090），镜像构建时注入 git commit（build-commit.txt），`/api/v1/health` 可查 version+commit。
 
 ---
 
 ## 11. 开发计划（里程碑）
 
-| 阶段 | 内容 | 产出 |
+| 阶段 | 内容 | 状态 |
 |---|---|---|
-| M1 | 后端核心：API 骨架、SQLite 建表、Prompt 合并逻辑、LLM 适配层对接 wan8 服务 | `/api/v1/process` 可跑通一次真实翻译润色请求 |
-| M2 | 管理后台 API：Prompt 配置、供应商 CRUD + 测试连接、API Key 管理、日志查询 | 后台接口全部可用（可用 curl/Postman 验证） |
-| M3 | 管理后台前端：登录页、概览页、Prompt 配置页、供应商管理页、API Key 页、日志页 | 完整可操作的 Web 界面 |
-| M4 | 安全加固与打包：限流、输入校验、加密存储审查、Docker 化、README | 可一条命令部署的完整服务 |
-| M5 | 接入现有项目试点（如 apkpure-crawler）替换原有翻译逻辑 | 验证真实业务场景可用 |
+| M1 | 后端核心：API 骨架、SQLite 建表、Prompt 合并逻辑、LLM 适配层对接 freellmapi | ✅ 完成 |
+| M2 | 管理后台 API：Prompt 配置、供应商 CRUD + 测试连接、API Key 管理、日志查询 | ✅ 完成 |
+| M3 | 管理后台前端：登录（统一账号中心）、概览、Playground、Prompt、供应商、Key、日志（分页）、文档、设置 | ✅ 完成 |
+| M4 | 安全加固与打包：限流、幂等、输入校验、加密存储、OpenAPI 文档、Docker 化、CI 推送 | ✅ 完成（v1.1.0，44 测试） |
+| M5 | 接入现有项目试点（如 apkpure-crawler）替换原有翻译逻辑 | ⬜ 待做 |
+| M6 | 流式/异步/批量接口（见 docs/ASYNC_API_DESIGN.md） | ⬜ 待用户拍板优先级 |
 
 ---
 
-## 12. 待确认事项
+## 12. 已确认事项（v1.1 更新）
 
-1. **LLM 供应商鉴权信息**：`http://192.168.88.62:3001/` 当前测试返回 `Invalid API key`，已尝试工作区现有的 `WAN8_KEY` 环境变量但不匹配，已向龙虾二号请求正确的 Key，拿到后在部署时通过后台表单填入，不写入代码库。
-2. **该 LLM 服务支持的模型名**：需要确认 `/v1/models` 列表或由对方直接告知可用模型名（当前文档默认用 `gpt-4o-mini` 占位，待确认后调整）。
-3. **部署位置**：按工作区惯例，部署服务器是 s47（局域网）或 s219（公网+GitHub Actions runner），需要确认文镕部署在哪一个；由于默认 LLM 供应商是局域网地址 `192.168.88.62`，建议部署在 s47（同局域网，访问延迟低且不需要额外打通公网到内网的路由）。
-4. **是否需要公网访问**：如果只是工作区内部项目调用，建议仅限内网访问，不暴露公网，更安全。
+1. ~~LLM 供应商鉴权信息~~：已解决，freellmapi（192.168.88.62:3001）的 Key 已配置在后台（加密存储）。
+2. ~~LLM 服务支持的模型名~~：已确认，默认用 `auto` 路由，可在后台切换具体模型。
+3. ~~部署位置~~：已部署在 s47（192.168.88.47:4090），与上游同局域网。
+4. ~~公网访问~~：已通过 Cloudflare 隧道映射 https://wr.909939.xyz，OAuth 回调地址已登记；业务 API 鉴权保留。
+
+### 12.1 当前待确认事项
+
+1. **流式/异步/批量接口优先级**：设计稿已备（docs/ASYNC_API_DESIGN.md），等用户拍板先做哪个。
+2. **build-commit.txt 自动化**：目前每次部署前需手动 `git rev-parse --short HEAD > build-commit.txt`，可改为 docker compose build args 自动注入。
+3. **acc 应用 redirect_uri 双地址**：目前内网 IP 与域名两个回调都已登记，但容器 ACC_REDIRECT_URI 只指向域名；若需内网 IP 也能完成登录，需按访问来源动态选择回调地址。
 
 ---
 
