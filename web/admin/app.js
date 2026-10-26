@@ -96,8 +96,8 @@ function renderLogin(root) {
 
 function renderApp(root) {
   root.innerHTML = '';
-  const nav = ['dashboard', 'playground', 'prompts', 'providers', 'logs', 'settings'];
-  const labels = { dashboard: '概览', playground: 'Playground', prompts: 'Prompt 配置', providers: 'LLM 供应商', logs: '调用日志', settings: '设置' };
+  const nav = ['dashboard', 'playground', 'prompts', 'providers', 'logs', 'docs', 'settings'];
+  const labels = { dashboard: '概览', playground: 'Playground', prompts: 'Prompt 配置', providers: 'LLM 供应商', logs: '调用日志', docs: '文档', settings: '设置' };
   if (!nav.includes(state.route)) state.route = 'dashboard';
 
   const userName = state.user ? state.user.name || state.user.email || state.user.sub : '';
@@ -121,7 +121,7 @@ function renderApp(root) {
   root.appendChild(sidebar);
   root.appendChild(main);
 
-  const renderers = { dashboard: renderDashboard, playground: renderPlayground, prompts: renderPrompts, providers: renderProviders, logs: renderLogs, settings: renderSettings };
+  const renderers = { dashboard: renderDashboard, playground: renderPlayground, prompts: renderPrompts, providers: renderProviders, logs: renderLogs, docs: renderDocs, settings: renderSettings };
   renderers[state.route](main);
 }
 
@@ -429,6 +429,79 @@ async function renderProviders(main) {
 
   main.appendChild(el('button', { onclick: () => editProvider(null) }, '+ 新增供应商'));
   await reload();
+}
+
+// ---------------- 文档 ----------------
+
+function renderDocs(main) {
+  main.innerHTML = '';
+  main.appendChild(el('h1', {}, '接入文档'));
+  const origin = location.origin;
+  const curl =
+    "curl -X POST '" + origin + "/api/v1/process' \\\n" +
+    "  -H 'Authorization: Bearer wr_live_你的密钥' \\\n" +
+    "  -H 'Content-Type: application/json' \\\n" +
+    "  -d '{\"text\": \"This is a sample paragraph.\"}'";
+
+  main.appendChild(el('div', { class: 'card docs' }, [
+    el('h2', {}, '这个服务做什么'),
+    el('p', {}, '文镕把一段文本交给大模型处理，默认是「翻译成中文并润色」。调用方也可以自己带指令，覆盖默认行为。'),
+    el('p', {}, ['服务地址：', el('code', {}, origin), '。管理台仅供配置，业务调用走下面的接口。'])
+  ]));
+
+  main.appendChild(el('div', { class: 'card docs' }, [
+    el('h2', {}, '1. 先拿 API Key'),
+    el('p', {}, ['到侧栏「设置 → API Key 管理」新建一个 Key。完整密钥只在创建时显示一次，请立刻保存。每个调用方建议单独建一个，方便单独禁用。']),
+    el('p', {}, '外部调用必须带请求头 Authorization: Bearer <API_KEY>。没带、写错、或 Key 已被禁用/删除，一律返回 401。')
+  ]));
+
+  main.appendChild(el('div', { class: 'card docs' }, [
+    el('h2', {}, '2. 调用翻译润色'),
+    el('p', {}, ['POST ', el('code', {}, '/api/v1/process')]),
+    el('pre', { class: 'mono' }, curl),
+    el('p', {}, '成功时 HTTP 200，正文在 data.result：'),
+    el('pre', { class: 'mono' },
+      '{\n  "success": true,\n  "data": {\n    "result": "这是一段示例段落。",\n    "usedPrompt": "default_translate_polish",\n    "model": "agnes-3.0-flash",\n    "usage": { "promptTokens": 42, "completionTokens": 18, "totalTokens": 60 },\n    "latencyMs": 2400\n  },\n  "requestId": "req_7f3a9c2e"\n}')
+  ]));
+
+  main.appendChild(el('div', { class: 'card docs' }, [
+    el('h2', {}, '3. 请求字段'),
+    el('table', {}, [
+      el('thead', {}, el('tr', {}, [el('th', {}, '字段'), el('th', {}, '必填'), el('th', {}, '说明')])),
+      el('tbody', {}, [
+        el('tr', {}, [el('td', { class: 'mono' }, 'text'), el('td', {}, '是'), el('td', {}, '待处理原文。默认上限 20000 字符，可在「Prompt 配置」里改。')]),
+        el('tr', {}, [el('td', { class: 'mono' }, 'prompt'), el('td', {}, '否'), el('td', {}, '非空时整段替换默认用户提示词。System Prompt 始终生效，调用方不能覆盖。')]),
+        el('tr', {}, [el('td', { class: 'mono' }, 'providerId'), el('td', {}, '否'), el('td', {}, '指定某个已启用的供应商；不传则用默认供应商。')])
+      ])
+    ]),
+    el('p', {}, '自定义指令示例（只改标题，不走默认翻译润色）：'),
+    el('pre', { class: 'mono' }, '{"text": "We shipped a faster sync.", "prompt": "改写成不超过 20 字的中文标题，只输出标题。"}'),
+    el('p', {}, ['此时响应里 ', el('code', {}, 'usedPrompt'), ' 为 ', el('code', {}, 'custom'), '。默认行为则为 ', el('code', {}, 'default_translate_polish'), '。'])
+  ]));
+
+  main.appendChild(el('div', { class: 'card docs' }, [
+    el('h2', {}, '4. 错误与限制'),
+    el('table', {}, [
+      el('thead', {}, el('tr', {}, [el('th', {}, 'HTTP'), el('th', {}, 'error.code'), el('th', {}, '什么时候')])),
+      el('tbody', {}, [
+        el('tr', {}, [el('td', {}, '400'), el('td', { class: 'mono' }, 'INVALID_REQUEST'), el('td', {}, '缺 text、JSON 不合法，或请求体过大')]),
+        el('tr', {}, [el('td', {}, '401'), el('td', { class: 'mono' }, 'UNAUTHORIZED'), el('td', {}, '没带 Key，或 Key 无效/已禁用')]),
+        el('tr', {}, [el('td', {}, '413'), el('td', { class: 'mono' }, 'TEXT_TOO_LONG'), el('td', {}, 'text 超过长度上限')]),
+        el('tr', {}, [el('td', {}, '400'), el('td', { class: 'mono' }, 'PROVIDER_NOT_FOUND'), el('td', {}, 'providerId 不存在或未启用')]),
+        el('tr', {}, [el('td', {}, '429'), el('td', { class: 'mono' }, 'RATE_LIMITED'), el('td', {}, '同一 Key 超过每分钟 60 次')]),
+        el('tr', {}, [el('td', {}, '502'), el('td', { class: 'mono' }, 'LLM_UPSTREAM_ERROR'), el('td', {}, '上游模型失败或超时，可稍后重试')]),
+        el('tr', {}, [el('td', {}, '500'), el('td', { class: 'mono' }, 'INTERNAL_ERROR'), el('td', {}, '服务内部异常，例如还没配默认供应商')])
+      ])
+    ]),
+    el('p', {}, '失败响应形如 {"success":false,"error":{"code":"...","message":"..."},"requestId":"..."}。排查时把 requestId 对上「调用日志」。'),
+    el('p', {}, '同步接口会一直等到模型返回，常见 2～40 秒，客户端超时建议设到 90 秒以上。')
+  ]));
+
+  main.appendChild(el('div', { class: 'card docs' }, [
+    el('h2', {}, '5. 探活（不需要 Key）'),
+    el('p', {}, [el('code', {}, 'GET /healthz'), ' 返回 {"ok":true}，给容器健康检查用。']),
+    el('p', {}, [el('code', {}, 'GET /api/v1/health'), ' 额外带上默认供应商是否启用，给监控用。这两个接口都不做业务处理。'])
+  ]));
 }
 
 // ---------------- 设置（账号信息 + API Key 管理） ----------------
