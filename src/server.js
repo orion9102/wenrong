@@ -182,6 +182,29 @@ function buildOpenApiDocument() {
   };
 }
 
+/**
+ * Scalar 文档页：单 HTML，CDN 引用 @scalar/api-reference，读取同源 /api/v1/openapi.json。
+ * 无需构建、无需登录（openapi.json 本身就是公开契约）。
+ */
+function buildDocsHtml() {
+  return [
+    '<!DOCTYPE html>',
+    '<html lang="zh-CN">',
+    '<head>',
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<title>WenRong 文镕 API 文档</title>',
+    '<meta name="robots" content="noindex">',
+    '<style>body{margin:0}</style>',
+    '</head>',
+    '<body>',
+    '<script id="api-reference" data-url="/api/v1/openapi.json"></script>',
+    '<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1/dist/browser/standalone.js"></script>',
+    '</body>',
+    '</html>'
+  ].join('\n');
+}
+
 function requestIdOf(req) {
   const incoming = req.headers['x-request-id'];
   if (typeof incoming === 'string' && /^[A-Za-z0-9._:-]{8,80}$/.test(incoming)) return incoming.slice(0, 80);
@@ -352,6 +375,11 @@ function createServer(options = {}) {
         return;
       }
 
+      if (pathname === '/api/v1/docs' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(buildDocsHtml());
+        return;
+      }
       if (pathname === '/api/v1/openapi.json' && req.method === 'GET') {
         sendJson(res, 200, buildOpenApiDocument());
         return;
@@ -639,4 +667,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { createServer, sendJson, sendApiError, buildOpenApiDocument, DEFAULT_PORT, SERVICE_VERSION };
+module.exports = { createServer, sendJson, sendApiError, buildOpenApiDocument, buildDocsHtml, DEFAULT_PORT, SERVICE_VERSION };

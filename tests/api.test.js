@@ -708,3 +708,17 @@ test('GET /api/v1/openapi.json 返回与实际契约一致的文档', async () =
   server.close();
   store.close();
 });
+
+test('GET /api/v1/docs 返回 Scalar 文档页', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const server = await startServer(store);
+  try {
+    const res = await request(server, { method: 'GET', path: '/api/v1/docs' });
+    assert.equal(res.status, 200);
+    assert.ok(res.raw.includes('data-url="/api/v1/openapi.json"'), '应引用同源 openapi.json');
+    assert.ok(res.raw.includes('@scalar/api-reference'), '应引用 Scalar');
+  } finally {
+    server.close();
+    store.close();
+  }
+});
