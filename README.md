@@ -90,12 +90,16 @@ curl -X POST http://localhost:4090/api/v1/process \
 { "text": "...", "prompt": "将下面内容改写为吸引点击的中文标题，不超过20字" }
 ```
 
+可选请求头：`Idempotency-Key`（8～128 位，同一 Key 同一内容 24 小时内回放，内容冲突返回 409）；`X-Request-Id`（原样作为 requestId 返回）。
+
 错误码：`INVALID_REQUEST` (400) · `UNAUTHORIZED` (401) · `TEXT_TOO_LONG` (413) ·
-`PROVIDER_NOT_FOUND` (400) · `LLM_UPSTREAM_ERROR` (502) · `RATE_LIMITED` (429) · `INTERNAL_ERROR` (500)
+`PROVIDER_NOT_FOUND` (400) · `IDEMPOTENCY_CONFLICT` (409) · `RATE_LIMITED` (429) ·
+`UPSTREAM_RATE_LIMITED` (429，上游限流) · `LLM_UPSTREAM_ERROR` (502/503) · `INTERNAL_ERROR` (500)
 
-### GET /api/v1/health
+### GET /healthz 与 GET /api/v1/health
 
-无需鉴权，返回服务状态和默认供应商信息，用于探活监控。
+无需鉴权。`/healthz` 返回 `{"ok":true}`，给容器健康检查用；`/api/v1/health` 额外带默认供应商是否启用。
+局域网偶发丢包时第一次连接会失败，探活请至少重试 2 次：`curl --retry 2 --retry-connrefused --retry-delay 2`。
 
 ## 管理台
 
