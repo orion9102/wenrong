@@ -17,8 +17,8 @@ npm start
 # 默认监听 http://0.0.0.0:4090
 ```
 
-首次启动会自动创建一条默认 LLM 供应商记录（地址来自 `DEFAULT_PROVIDER_BASE_URL`，API Key 留空），
-打开 `http://localhost:4090/admin` 完成管理员账号初始化后，在「LLM 供应商」页填入真实 API Key。
+首次启动会自动创建一条默认 LLM 供应商记录（地址来自 `DEFAULT_PROVIDER_BASE_URL`）。
+打开 `http://<host>:4090/`，点「使用统一账号中心登录」，在 acc.909939.xyz 登录后回到管理台。
 
 ### Docker 部署
 
@@ -28,12 +28,34 @@ cp config/.env.example .env
 docker compose up -d
 ```
 
+- 管理台：`http://<host>:4090/`（旧的 `/admin` 路由已移除）
 - 业务 API：`http://<host>:4090/api/v1/process`
-- 管理后台：`http://<host>:4090/admin`
 
-> 安全提示：本服务启动后即对外提供 HTTP API 和管理后台。业务 API 需要 `Authorization: Bearer <API_KEY>`
-> 才能调用（在后台「API Key 管理」页生成），管理后台需要账号密码登录。默认不建议把本服务直接暴露到公网，
-> 推荐部署在内网，仅供内部项目调用。
+> 安全提示：业务 API 必须携带 `Authorization: Bearer <API_KEY>`（在管理台「设置 → API Key 管理」生成，
+> 可建多个、可单独禁用/删除），否则 401。管理台登录由统一账号中心完成，默认仅 `admin` 角色可进入。
+> 服务走纯 HTTP，推荐部署在内网，仅供内部项目调用。
+
+### 统一账号中心登录（acc.909939.xyz）
+
+采用 OAuth 2.0 授权码 + PKCE（S256，公共客户端，无 secret）：
+
+1. `GET /api/auth/login` → 生成 state/code_verifier，302 到 acc 授权页
+2. acc 登录后回跳 `GET /api/auth/callback?code&state` → 校验 state（与浏览器 cookie 绑定，防登录 CSRF）→
+   携 code_verifier 换令牌 → 用 acc JWKS 验签 `id_token`（RS256，校验 iss/aud/exp/nonce）→ 校验角色
+3. 签发本地会话 cookie `wenrong_session`（HttpOnly、SameSite=Lax、7 天；服务端只存 sha256）
+
+在 acc 登记应用（已在 s47 完成，app_id 见部署 `.env`）：
+
+```bash
+docker exec account-center node admin.mjs add-app wenrong "" "http://192.168.88.47:4090/api/auth/callback"
+```
+
+| 环境变量 | 说明 | 默认 |
+|---|---|---|
+| `ACC_BASE` | 账号中心地址 | `https://acc.909939.xyz` |
+| `ACC_CLIENT_ID` | acc 登记的 app_id（必填） | 空 |
+| `ACC_REDIRECT_URI` | 回调地址，须与 acc 登记的完全一致 | `http://192.168.88.47:4090/api/auth/callback` |
+| `ACC_REQUIRED_ROLE` | 放行角色；`*` 表示任意已登录账号 | `admin` |
 
 ## 业务 API
 
@@ -75,15 +97,16 @@ curl -X POST http://localhost:4090/api/v1/process \
 
 无需鉴权，返回服务状态和默认供应商信息，用于探活监控。
 
-## 管理后台
+## 管理台
 
-打开 `/admin`：
+打开 `/`（统一账号中心登录）：
 
 - **概览**：今日调用量、成功率、平均延迟、Token 消耗、默认供应商连通性
 - **Prompt 配置**：编辑 System Prompt / Default User Prompt / 最大文本长度，带修改历史
 - **LLM 供应商**：增删改查供应商配置，一键测试连通性，设置默认供应商
-- **API Key 管理**：为每个业务调用方生成独立 Key，可随时吊销
 - **调用日志**：按时间/状态/供应商筛选，查看错误详情
+- **设置**：当前账号信息；**API Key 管理**——可添加多个 Key（每个调用方一个），完整 Key 仅创建时展示一次，
+  支持重命名、禁用/启用、删除，记录创建者与最后使用时间
 
 ## 开发
 

@@ -180,7 +180,7 @@ GET /api/v1/health
 
 ### 4.3 管理后台 API（需管理员登录）
 
-管理后台的接口统一挂在 `/api/admin/*`，使用独立的后台登录态（session cookie），和业务 API 的 API Key 鉴权分开：
+管理台接口统一挂在 `/api/admin/*`，登录由统一账号中心 acc.909939.xyz 完成（OAuth 2.0 授权码 + PKCE，`/api/auth/login`、`/api/auth/callback`），登录后使用本地会话 cookie，和业务 API 的 API Key 鉴权分开（2026-10-26 起取代本地账号密码登录；管理台页面从 `/admin` 迁到根路径 `/`）：
 
 - `GET/PUT /api/admin/prompts` — 查看/更新系统提示词与默认用户提示词
 - `GET/POST/PUT/DELETE /api/admin/providers` — LLM 供应商的增删改查

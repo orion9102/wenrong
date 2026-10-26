@@ -8,8 +8,13 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { encrypt, decrypt, randomId } = require('./crypto.js');
+
+function sha256(v) {
+  return crypto.createHash('sha256').update(String(v)).digest('hex');
+}
 
 const DEFAULT_DB = path.join(process.cwd(), 'data', 'wenrong.sqlite');
 
@@ -108,7 +113,23 @@ class Store {
         created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL
       );
+
+      -- 统一账号中心（acc）登录后的本地会话；token 仅存 sha256
+      CREATE TABLE IF NOT EXISTS user_sessions (
+        token_hash TEXT PRIMARY KEY,
+        sub TEXT NOT NULL,
+        email TEXT,
+        name TEXT,
+        role TEXT,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
     `);
+    // 旧版本地管理员会话已废弃（改由 acc 登录），清空避免残留
+    this.db.exec('DELETE FROM admin_sessions');
+    // api_keys 增加创建者字段（向后兼容迁移）
+    const cols = this.db.prepare('PRAGMA table_info(api_keys)').all().map((c) => c.name);
+    if (!cols.includes('created_by')) this.db.exec('ALTER TABLE api_keys ADD COLUMN created_by TEXT');
   }
 
   _prepare() {
@@ -140,7 +161,7 @@ class Store {
       listApiKeys: this.db.prepare('SELECT * FROM api_keys ORDER BY created_at DESC'),
       getApiKeyByHash: this.db.prepare('SELECT * FROM api_keys WHERE key_hash = ?'),
       insertApiKey: this.db.prepare(
-        'INSERT INTO api_keys(id, label, key_hash, key_prefix, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)'
+        'INSERT INTO api_keys(id, label, key_hash, key_prefix, enabled, created_at, created_by) VALUES (?, ?, ?, ?, 1, ?, ?)'
       ),
       touchApiKey: this.db.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?'),
       setApiKeyEnabled: this.db.prepare('UPDATE api_keys SET enabled = ? WHERE id = ?'),
@@ -151,18 +172,12 @@ class Store {
           'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       ),
 
-      getAdminByUsername: this.db.prepare('SELECT * FROM admin_users WHERE username = ?'),
-      countAdmins: this.db.prepare('SELECT COUNT(*) AS n FROM admin_users'),
-      insertAdmin: this.db.prepare(
-        'INSERT INTO admin_users(username, password_hash, created_at) VALUES (?, ?, ?)'
-      ),
-
       insertSession: this.db.prepare(
-        'INSERT INTO admin_sessions(token, admin_id, created_at, expires_at) VALUES (?, ?, ?, ?)'
+        'INSERT INTO user_sessions(token_hash, sub, email, name, role, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
       ),
-      getSession: this.db.prepare('SELECT * FROM admin_sessions WHERE token = ?'),
-      deleteSession: this.db.prepare('DELETE FROM admin_sessions WHERE token = ?'),
-      deleteExpiredSessions: this.db.prepare('DELETE FROM admin_sessions WHERE expires_at < ?')
+      getSession: this.db.prepare('SELECT * FROM user_sessions WHERE token_hash = ?'),
+      deleteSession: this.db.prepare('DELETE FROM user_sessions WHERE token_hash = ?'),
+      deleteExpiredSessions: this.db.prepare('DELETE FROM user_sessions WHERE expires_at < ?')
     };
   }
 
@@ -326,15 +341,25 @@ class Store {
       keyPrefix: r.key_prefix,
       enabled: !!r.enabled,
       createdAt: r.created_at,
-      lastUsedAt: r.last_used_at
+      lastUsedAt: r.last_used_at,
+      createdBy: r.created_by || null
     }));
   }
 
-  createApiKey(label, rawKey, keyHash) {
+  createApiKey(label, rawKey, keyHash, createdBy = null) {
     const id = randomId('key');
     const prefix = rawKey.slice(0, 12) + '...';
-    this.stmt.insertApiKey.run(id, label, keyHash, prefix, this.now());
-    return { id, label, keyPrefix: prefix };
+    this.stmt.insertApiKey.run(id, label, keyHash, prefix, this.now(), createdBy);
+    return { id, label, keyPrefix: prefix, enabled: true, createdAt: this.now(), createdBy };
+  }
+
+  getApiKey(id) {
+    const r = this.db.prepare('SELECT * FROM api_keys WHERE id = ?').get(id);
+    return r ? { id: r.id, label: r.label, enabled: !!r.enabled } : null;
+  }
+
+  renameApiKey(id, label) {
+    this.db.prepare('UPDATE api_keys SET label = ? WHERE id = ?').run(label, id);
   }
 
   verifyApiKeyHash(hash) {
@@ -436,36 +461,27 @@ class Store {
 
   // ---------- admin users / sessions ----------
 
-  countAdmins() {
-    return Number(this.stmt.countAdmins.get().n || 0);
-  }
+  // ---------- 用户会话（acc 登录） ----------
 
-  getAdminByUsername(username) {
-    return this.stmt.getAdminByUsername.get(username);
-  }
-
-  createAdmin(username, passwordHash) {
-    this.stmt.insertAdmin.run(username, passwordHash, this.now());
-  }
-
-  createSession(adminId, ttlMs) {
-    const token = randomId('sess') + randomId('');
+  createSession(user, ttlMs) {
+    const token = crypto.randomBytes(32).toString('base64url');
     const ts = this.now();
-    this.stmt.insertSession.run(token, adminId, ts, ts + ttlMs);
+    this.stmt.insertSession.run(sha256(token), user.sub, user.email || null, user.name || null, user.role || null, ts, ts + ttlMs);
     return token;
   }
 
   getSession(token) {
+    if (!token) return null;
     this.stmt.deleteExpiredSessions.run(this.now());
-    const row = this.stmt.getSession.get(token);
-    if (!row) return null;
-    if (row.expires_at < this.now()) return null;
-    return row;
+    const row = this.stmt.getSession.get(sha256(token));
+    if (!row || row.expires_at < this.now()) return null;
+    return { sub: row.sub, email: row.email, name: row.name, role: row.role, expiresAt: row.expires_at };
   }
 
   deleteSession(token) {
-    this.stmt.deleteSession.run(token);
+    if (token) this.stmt.deleteSession.run(sha256(token));
   }
+
 
   close() {
     try {

@@ -3,27 +3,15 @@
 /**
  * 文镕（WenRong）服务入口（node:http，零 npm 运行时依赖）
  *
- * 业务 API：
- *   GET  /healthz
- *   GET  /api/v1/health
+ * 业务 API（需 Authorization: Bearer <API_KEY>）：
  *   POST /api/v1/process
+ * 公开：
+ *   GET  /healthz、GET /api/v1/health
+ * 登录（统一账号中心 acc.909939.xyz，见 src/acc-auth.js）：
+ *   GET  /api/auth/login、GET /api/auth/callback、POST /api/auth/logout、GET /api/auth/me
+ * 管理台 API（需登录会话，见 src/admin-routes.js）：/api/admin/*
  *
- * 管理后台 API（见 src/admin-routes.js）：
- *   POST /api/admin/login
- *   POST /api/admin/logout
- *   GET  /api/admin/me
- *   GET/PUT /api/admin/prompts
- *   GET  /api/admin/prompts/history
- *   GET/POST /api/admin/providers
- *   PUT/DELETE /api/admin/providers/:id
- *   POST /api/admin/providers/:id/test
- *   POST /api/admin/providers/:id/set-default
- *   GET/POST /api/admin/api-keys
- *   PUT/DELETE /api/admin/api-keys/:id
- *   GET  /api/admin/logs
- *   GET  /api/admin/metrics
- *
- * 静态文件：/admin/* 托管管理后台前端（web/admin 目录）
+ * 静态文件：/ 托管管理台前端（web/admin 目录）；旧的 /admin 路由已移除
  */
 
 const http = require('node:http');
@@ -36,7 +24,8 @@ const { chatComplete, LlmUpstreamError } = require('./llm-client.js');
 const { buildMessages } = require('./prompt-engine.js');
 const { RateLimiter } = require('./rate-limiter.js');
 const { hashApiKey, randomId } = require('./crypto.js');
-const { handleAdminRoute } = require('./admin-routes.js');
+const { handleAdminRoute, handleAuthRoute } = require('./admin-routes.js');
+const { createAccAuth } = require('./acc-auth.js');
 
 const WEB_DIR = path.join(__dirname, '..', 'web');
 const DEFAULT_PORT = 4090;
@@ -101,15 +90,16 @@ function readJsonBody(req, { maxBytes = 2 * 1024 * 1024 } = {}) {
 }
 
 function serveStatic(req, res, pathname, staticDir) {
-  // /admin 无尾斜杠时重定向到 /admin/，避免浏览器把相对路径 app.js/style.css 解析到根路径
-  if (pathname === '/admin') {
-    res.writeHead(301, { Location: '/admin/' });
-    res.end();
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendApiError(res, 405, 'METHOD_NOT_ALLOWED', '不支持的请求方法');
     return;
   }
-  const rel = pathname === '/' || pathname === '/admin/'
-    ? 'index.html'
-    : pathname.replace(/^\/admin\/?/, '') || 'index.html';
+  // 旧管理台路径 /admin 已移除
+  if (pathname === '/admin' || pathname.startsWith('/admin/')) {
+    sendApiError(res, 404, 'NOT_FOUND', '页面不存在');
+    return;
+  }
+  const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const root = path.resolve(staticDir);
   const full = path.resolve(root, rel);
   if (full !== root && !full.startsWith(root + path.sep)) {
@@ -154,6 +144,7 @@ function createServer(options = {}) {
   const now = options.now || (() => Date.now());
   const rateLimiter = options.rateLimiter || new RateLimiter({ windowMs: 60000, maxRequests: 60 });
   const encryptionKey = options.encryptionKey || process.env.ENCRYPTION_KEY || 'wenrong-dev-key-change-me';
+  const accAuth = options.accAuth || createAccAuth();
 
   const server = http.createServer(async (req, res) => {
     let url;
@@ -186,7 +177,12 @@ function createServer(options = {}) {
         return;
       }
 
-      if (pathname.startsWith('/api/admin')) {
+      if (pathname.startsWith('/api/auth/')) {
+        await handleAuthRoute({ req, res, url, store, accAuth, sendJson, logger });
+        return;
+      }
+
+      if (pathname === '/api/admin' || pathname.startsWith('/api/admin/')) {
         await handleAdminRoute({ req, res, url, store, logger, now, encryptionKey, sendJson });
         return;
       }
@@ -356,7 +352,7 @@ function main() {
   server.listen(port, '0.0.0.0', () => {
     console.log('[wenrong] 已启动 http://0.0.0.0:' + port);
     console.log('[wenrong] 业务 API: POST /api/v1/process');
-    console.log('[wenrong] 管理后台: http://0.0.0.0:' + port + '/admin');
+    console.log('[wenrong] 管理台: http://0.0.0.0:' + port + '/（统一账号中心登录）');
   });
 
   const shutdown = (signal) => {

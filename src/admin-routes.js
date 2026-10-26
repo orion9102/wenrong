@@ -1,19 +1,21 @@
 'use strict';
 
 /**
- * 管理后台 API（挂载在 /api/admin/*）
+ * 管理台 API（挂载在 /api/admin/*）与登录路由（/api/auth/*）
  *
- * 鉴权：除 /api/admin/login、/api/admin/bootstrap-status 外，其余接口都需要有效的
- * session cookie（wenrong_admin_session）。
+ * 登录：统一账号中心 acc.909939.xyz（OAuth 2.0 授权码 + PKCE，见 src/acc-auth.js），
+ * 登录成功后签发本地会话 cookie（wenrong_session，7 天，HttpOnly）。
+ * /api/admin/* 全部需要有效会话。
  */
 
 const {
-  hashPassword,
-  verifyPassword,
   parseCookies,
   sessionCookieHeader,
   clearCookieHeader,
+  stateCookieHeader,
+  clearStateCookieHeader,
   COOKIE_NAME,
+  STATE_COOKIE,
   SESSION_TTL_MS
 } = require('./admin-auth.js');
 const { chatComplete, testConnection } = require('./llm-client.js');
@@ -55,76 +57,96 @@ function sendErr(sendJson, res, status, error, message) {
 
 function requireAuth(req, store) {
   const cookies = parseCookies(req.headers['cookie']);
-  const token = cookies[COOKIE_NAME];
-  if (!token) return null;
-  const session = store.getSession(token);
-  if (!session) return null;
-  return session;
+  return store.getSession(cookies[COOKIE_NAME]);
+}
+
+function isSecureRequest(req) {
+  return String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+}
+
+function sendHtmlError(res, status, message) {
+  const safe = String(message).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>登录失败 · 文镕</title></head>` +
+    `<body style="font-family:system-ui;padding:48px;color:#1f2937"><h2>登录失败</h2><p>${safe}</p><p><a href="/">返回首页重新登录</a></p></body></html>`;
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': clearStateCookieHeader() });
+  res.end(html);
+}
+
+/** 登录相关路由：/api/auth/login、/api/auth/callback、/api/auth/logout、/api/auth/me */
+async function handleAuthRoute({ req, res, url, store, accAuth, sendJson, logger }) {
+  const pathname = url.pathname;
+  const method = req.method;
+  const secure = isSecureRequest(req);
+
+  if (pathname === '/api/auth/login' && method === 'GET') {
+    if (!accAuth.configured()) {
+      sendHtmlError(res, 500, '服务未配置统一账号中心（ACC_CLIENT_ID / ACC_REDIRECT_URI）');
+      return;
+    }
+    const { url: authorizeUrl, state } = accAuth.buildAuthorizeUrl();
+    res.writeHead(302, { Location: authorizeUrl, 'Set-Cookie': stateCookieHeader(state, { secure }), 'Cache-Control': 'no-store' });
+    res.end();
+    return;
+  }
+
+  if (pathname === '/api/auth/callback' && method === 'GET') {
+    const err = url.searchParams.get('error');
+    if (err) {
+      sendHtmlError(res, 400, '账号中心返回：' + (url.searchParams.get('error_description') || err));
+      return;
+    }
+    try {
+      const cookies = parseCookies(req.headers['cookie']);
+      const user = await accAuth.handleCallback({
+        code: url.searchParams.get('code'),
+        state: url.searchParams.get('state'),
+        cookieState: cookies[STATE_COOKIE]
+      });
+      const token = store.createSession(user, SESSION_TTL_MS);
+      res.writeHead(302, {
+        Location: '/',
+        'Set-Cookie': [sessionCookieHeader(token, { secure }), clearStateCookieHeader({ secure })],
+        'Cache-Control': 'no-store'
+      });
+      res.end();
+    } catch (e) {
+      if (logger && logger.error) logger.error('[wenrong] acc 登录失败：', e.message);
+      sendHtmlError(res, e.status || 502, e.message);
+    }
+    return;
+  }
+
+  if (pathname === '/api/auth/logout' && method === 'POST') {
+    const cookies = parseCookies(req.headers['cookie']);
+    store.deleteSession(cookies[COOKIE_NAME]);
+    res.setHeader('Set-Cookie', clearCookieHeader({ secure }));
+    sendJson(res, 200, { success: true });
+    return;
+  }
+
+  if (pathname === '/api/auth/me' && method === 'GET') {
+    const session = requireAuth(req, store);
+    if (!session) {
+      sendJson(res, 401, { success: false, error: 'UNAUTHORIZED', message: '未登录', loginUrl: '/api/auth/login' });
+      return;
+    }
+    sendJson(res, 200, { success: true, user: { sub: session.sub, email: session.email, name: session.name, role: session.role } });
+    return;
+  }
+
+  sendErr(sendJson, res, 404, 'NOT_FOUND', '接口不存在：' + pathname);
 }
 
 async function handleAdminRoute({ req, res, url, store, logger, now, encryptionKey, sendJson }) {
   const pathname = url.pathname;
   const method = req.method;
 
-  // ---------- 无需登录 ----------
-
-  if (pathname === '/api/admin/bootstrap-status' && method === 'GET') {
-    sendJson(res, 200, { needsSetup: store.countAdmins() === 0 });
-    return;
-  }
-
-  if (pathname === '/api/admin/bootstrap' && method === 'POST') {
-    if (store.countAdmins() > 0) {
-      sendErr(sendJson, res, 400, 'ALREADY_SETUP', '已存在管理员账号，请直接登录');
-      return;
-    }
-    const body = await readJsonBody(req);
-    const username = (body.username || '').trim();
-    const password = body.password || '';
-    if (!username || password.length < 8) {
-      sendErr(sendJson, res, 400, 'INVALID_REQUEST', '用户名不能为空，密码至少 8 位');
-      return;
-    }
-    store.createAdmin(username, hashPassword(password));
-    sendJson(res, 200, { success: true });
-    return;
-  }
-
-  if (pathname === '/api/admin/login' && method === 'POST') {
-    const body = await readJsonBody(req);
-    const username = (body.username || '').trim();
-    const password = body.password || '';
-    const admin = store.getAdminByUsername(username);
-    if (!admin || !verifyPassword(password, admin.password_hash)) {
-      sendErr(sendJson, res, 401, 'INVALID_CREDENTIALS', '用户名或密码错误');
-      return;
-    }
-    const token = store.createSession(admin.id, SESSION_TTL_MS);
-    res.setHeader('Set-Cookie', sessionCookieHeader(token));
-    sendJson(res, 200, { success: true, username: admin.username });
-    return;
-  }
-
-  // ---------- 需要登录 ----------
-
   const session = requireAuth(req, store);
   if (!session) {
-    sendErr(sendJson, res, 401, 'UNAUTHORIZED', '请先登录管理后台');
+    sendErr(sendJson, res, 401, 'UNAUTHORIZED', '请先通过统一账号中心登录');
     return;
   }
-
-  if (pathname === '/api/admin/logout' && method === 'POST') {
-    const cookies = parseCookies(req.headers['cookie']);
-    store.deleteSession(cookies[COOKIE_NAME]);
-    res.setHeader('Set-Cookie', clearCookieHeader());
-    sendJson(res, 200, { success: true });
-    return;
-  }
-
-  if (pathname === '/api/admin/me' && method === 'GET') {
-    sendJson(res, 200, { success: true, adminId: session.admin_id });
-    return;
-  }
+  const operator = 'acc:' + (session.email || session.sub);
 
   // ---- Prompts ----
 
@@ -150,7 +172,7 @@ async function handleAdminRoute({ req, res, url, store, logger, now, encryptionK
         defaultUserPrompt: body.defaultUserPrompt,
         maxTextLength: body.maxTextLength
       },
-      'admin:' + session.admin_id
+      operator
     );
     sendJson(res, 200, {
       success: true,
@@ -250,13 +272,13 @@ async function handleAdminRoute({ req, res, url, store, logger, now, encryptionK
 
   if (pathname === '/api/admin/api-keys' && method === 'POST') {
     const body = await readJsonBody(req);
-    const label = (body.label || '').trim();
-    if (!label) {
-      sendErr(sendJson, res, 400, 'INVALID_REQUEST', '缺少必填字段 label');
+    const label = String(body.label || '').trim();
+    if (!label || label.length > 64) {
+      sendErr(sendJson, res, 400, 'INVALID_REQUEST', '名称不能为空，且不超过 64 个字符');
       return;
     }
     const rawKey = generateApiKey();
-    const created = store.createApiKey(label, rawKey, hashApiKey(rawKey));
+    const created = store.createApiKey(label, rawKey, hashApiKey(rawKey), operator);
     // 完整 key 仅在创建时返回一次
     sendJson(res, 200, { success: true, data: Object.assign({}, created, { apiKey: rawKey }) });
     return;
@@ -266,12 +288,28 @@ async function handleAdminRoute({ req, res, url, store, logger, now, encryptionK
   if (apiKeyMatch) {
     const id = decodeURIComponent(apiKeyMatch[1]);
     if (method === 'PUT') {
+      if (!store.getApiKey(id)) {
+        sendErr(sendJson, res, 404, 'NOT_FOUND', 'API Key 不存在');
+        return;
+      }
       const body = await readJsonBody(req);
       if (body.enabled !== undefined) store.setApiKeyEnabled(id, !!body.enabled);
+      if (body.label !== undefined) {
+        const label = String(body.label || '').trim();
+        if (!label || label.length > 64) {
+          sendErr(sendJson, res, 400, 'INVALID_REQUEST', '名称不能为空，且不超过 64 个字符');
+          return;
+        }
+        store.renameApiKey(id, label);
+      }
       sendJson(res, 200, { success: true });
       return;
     }
     if (method === 'DELETE') {
+      if (!store.getApiKey(id)) {
+        sendErr(sendJson, res, 404, 'NOT_FOUND', 'API Key 不存在');
+        return;
+      }
       store.deleteApiKey(id);
       sendJson(res, 200, { success: true });
       return;
@@ -391,4 +429,4 @@ async function handleAdminRoute({ req, res, url, store, logger, now, encryptionK
   sendErr(sendJson, res, 404, 'NOT_FOUND', '管理接口不存在：' + pathname);
 }
 
-module.exports = { handleAdminRoute };
+module.exports = { handleAdminRoute, handleAuthRoute };

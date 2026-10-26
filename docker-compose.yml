@@ -13,6 +13,11 @@ services:
       - DEFAULT_PROVIDER_BASE_URL=${DEFAULT_PROVIDER_BASE_URL:-http://192.168.88.62:3001/}
       - DEFAULT_PROVIDER_MODEL=${DEFAULT_PROVIDER_MODEL:-claude-sonnet-4-5}
       - DEFAULT_PROVIDER_API_KEY=${DEFAULT_PROVIDER_API_KEY:-}
+      # 统一账号中心（acc.909939.xyz）OAuth 公共客户端（PKCE）
+      - ACC_BASE=${ACC_BASE:-https://acc.909939.xyz}
+      - ACC_CLIENT_ID=${ACC_CLIENT_ID:-}
+      - ACC_REDIRECT_URI=${ACC_REDIRECT_URI:-http://192.168.88.47:4090/api/auth/callback}
+      - ACC_REQUIRED_ROLE=${ACC_REQUIRED_ROLE:-admin}
     volumes:
       - wenrong-data:/app/data
 

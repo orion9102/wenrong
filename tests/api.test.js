@@ -16,6 +16,7 @@ function startServer(store, extra = {}) {
 }
 
 function request(server, { method = 'GET', path, headers = {}, body } = {}) {
+  // 返回 headers 以便检查 Set-Cookie / Location
   return new Promise((resolve, reject) => {
     const port = server.address().port;
     const payload = body ? JSON.stringify(body) : null;
@@ -41,7 +42,7 @@ function request(server, { method = 'GET', path, headers = {}, body } = {}) {
           } catch (err) {
             json = null;
           }
-          resolve({ status: res.statusCode, json, raw });
+          resolve({ status: res.statusCode, json, raw, headers: res.headers });
         });
       }
     );
@@ -153,51 +154,203 @@ test('限流器在超出窗口请求数后拒绝', async () => {
   store.close();
 });
 
-test('管理后台首次访问提示需要初始化', async () => {
-  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
-  const server = await startServer(store);
-  const res = await request(server, { path: '/api/admin/bootstrap-status' });
-  assert.equal(res.status, 200);
-  assert.equal(res.json.needsSetup, true);
-  server.close();
-  store.close();
-});
-
-test('管理后台创建管理员账号并登录成功', async () => {
-  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
-  const server = await startServer(store);
-
-  const bootstrapRes = await request(server, {
-    method: 'POST',
-    path: '/api/admin/bootstrap',
-    body: { username: 'admin', password: 'password123' }
-  });
-  assert.equal(bootstrapRes.status, 200);
-
-  const loginRes = await request(server, {
-    method: 'POST',
-    path: '/api/admin/login',
-    body: { username: 'admin', password: 'password123' }
-  });
-  assert.equal(loginRes.status, 200);
-  assert.ok(loginRes.json.success);
-
-  const loginFail = await request(server, {
-    method: 'POST',
-    path: '/api/admin/login',
-    body: { username: 'admin', password: 'wrong-password' }
-  });
-  assert.equal(loginFail.status, 401);
-
-  server.close();
-  store.close();
-});
-
 test('未登录访问需鉴权的管理接口返回 401', async () => {
   const store = new Store({ file: ':memory:', encryptionKey: 'test' });
   const server = await startServer(store);
   const res = await request(server, { path: '/api/admin/prompts' });
   assert.equal(res.status, 401);
+  server.close();
+  store.close();
+});
+
+// ---------------- 统一账号中心登录 + 设置/API Key ----------------
+
+const crypto = require('node:crypto');
+const { createAccAuth } = require('../src/acc-auth.js');
+
+const ACC = 'https://acc.example.test';
+const CLIENT_ID = 'app_TEST';
+const REDIRECT = 'http://wr.test/api/auth/callback';
+
+/** 伪造 acc：自签 RS256 id_token，JWKS 返回对应公钥 */
+function makeFakeAcc({ role = 'admin', aud = CLIENT_ID, iss = ACC } = {}) {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwk = Object.assign(publicKey.export({ format: 'jwk' }), { kid: 'k1', alg: 'RS256', use: 'sig' });
+  let lastAuthorize = null;
+  function sign(payload) {
+    const h = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: 'k1' })).toString('base64url');
+    const p = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const sig = crypto.sign('RSA-SHA256', Buffer.from(h + '.' + p), privateKey).toString('base64url');
+    return h + '.' + p + '.' + sig;
+  }
+  const fetch = async (url, init = {}) => {
+    if (url === ACC + '/.well-known/jwks.json') return { ok: true, status: 200, json: async () => ({ keys: [jwk] }) };
+    if (url === ACC + '/v1/oauth/token') {
+      const body = JSON.parse(init.body);
+      const expect = crypto.createHash('sha256').update(body.code_verifier).digest('base64url');
+      if (body.code !== 'good-code' || expect !== lastAuthorize.get('code_challenge') || body.redirect_uri !== REDIRECT) {
+        return { ok: false, status: 400, json: async () => ({ message: 'INVALID_GRANT' }) };
+      }
+      const now = Math.floor(Date.now() / 1000);
+      const idToken = sign({ iss, aud, sub: 'U1', role, email: 'boss@example.com', name: 'Boss', nonce: lastAuthorize.get('nonce'), iat: now, exp: now + 3600 });
+      return { ok: true, status: 200, json: async () => ({ access_token: 'x', id_token: idToken }) };
+    }
+    throw new Error('unexpected fetch ' + url);
+  };
+  const accAuth = createAccAuth({ accBase: ACC, clientId: CLIENT_ID, redirectUri: REDIRECT, requiredRole: 'admin', fetch });
+  return { accAuth, setAuthorize: (u) => { lastAuthorize = new URL(u).searchParams; } };
+}
+
+function cookiesFrom(res) {
+  const sc = res.headers['set-cookie'] || [];
+  return sc.map((c) => c.split(';')[0]).filter((c) => !c.endsWith('=')).join('; ');
+}
+
+async function loginViaAcc(server, fake) {
+  const start = await request(server, { path: '/api/auth/login' });
+  assert.equal(start.status, 302);
+  fake.setAuthorize(start.headers.location);
+  const state = new URL(start.headers.location).searchParams.get('state');
+  const cb = await request(server, {
+    path: '/api/auth/callback?code=good-code&state=' + encodeURIComponent(state),
+    headers: { cookie: cookiesFrom(start) }
+  });
+  return cb;
+}
+
+test('/api/auth/login 302 到 acc 授权页，携带 PKCE S256 与 state cookie', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const fake = makeFakeAcc();
+  const server = await startServer(store, { accAuth: fake.accAuth });
+  const res = await request(server, { path: '/api/auth/login' });
+  assert.equal(res.status, 302);
+  const loc = new URL(res.headers.location);
+  assert.equal(loc.origin + loc.pathname, ACC + '/v1/oauth/authorize');
+  assert.equal(loc.searchParams.get('client_id'), CLIENT_ID);
+  assert.equal(loc.searchParams.get('redirect_uri'), REDIRECT);
+  assert.equal(loc.searchParams.get('code_challenge_method'), 'S256');
+  assert.ok(loc.searchParams.get('code_challenge'));
+  assert.match(String(res.headers['set-cookie']), /wenrong_oauth_state=/);
+  server.close();
+  store.close();
+});
+
+test('acc 回调成功后签发会话，可访问管理接口与 /api/auth/me', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const fake = makeFakeAcc();
+  const server = await startServer(store, { accAuth: fake.accAuth });
+  const cb = await loginViaAcc(server, fake);
+  assert.equal(cb.status, 302);
+  assert.equal(cb.headers.location, '/');
+  const cookie = cookiesFrom(cb);
+  assert.match(cookie, /wenrong_session=/);
+
+  const me = await request(server, { path: '/api/auth/me', headers: { cookie } });
+  assert.equal(me.status, 200);
+  assert.equal(me.json.user.email, 'boss@example.com');
+  assert.equal(me.json.user.role, 'admin');
+
+  const prompts = await request(server, { path: '/api/admin/prompts', headers: { cookie } });
+  assert.equal(prompts.status, 200);
+
+  const logout = await request(server, { method: 'POST', path: '/api/auth/logout', headers: { cookie } });
+  assert.equal(logout.status, 200);
+  const after = await request(server, { path: '/api/admin/prompts', headers: { cookie } });
+  assert.equal(after.status, 401);
+  server.close();
+  store.close();
+});
+
+test('acc 回调：state 与 cookie 不一致时拒绝（防登录 CSRF）', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const fake = makeFakeAcc();
+  const server = await startServer(store, { accAuth: fake.accAuth });
+  const start = await request(server, { path: '/api/auth/login' });
+  fake.setAuthorize(start.headers.location);
+  const state = new URL(start.headers.location).searchParams.get('state');
+  const cb = await request(server, { path: '/api/auth/callback?code=good-code&state=' + encodeURIComponent(state) });
+  assert.equal(cb.status, 400);
+  assert.ok(!String(cb.headers['set-cookie'] || '').includes('wenrong_session=s'));
+  server.close();
+  store.close();
+});
+
+test('acc 回调：非 admin 角色拒绝登录', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const fake = makeFakeAcc({ role: 'user' });
+  const server = await startServer(store, { accAuth: fake.accAuth });
+  const cb = await loginViaAcc(server, fake);
+  assert.equal(cb.status, 403);
+  server.close();
+  store.close();
+});
+
+test('acc 回调：id_token 受众不匹配时拒绝', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const fake = makeFakeAcc({ aud: 'app_OTHER' });
+  const server = await startServer(store, { accAuth: fake.accAuth });
+  const cb = await loginViaAcc(server, fake);
+  assert.equal(cb.status, 401);
+  server.close();
+  store.close();
+});
+
+test('旧 /admin 路由已移除，管理台托管在根路径', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const server = await startServer(store);
+  const old = await request(server, { path: '/admin/' });
+  assert.equal(old.status, 404);
+  const old2 = await request(server, { path: '/admin' });
+  assert.equal(old2.status, 404);
+  const root = await request(server, { path: '/' });
+  assert.equal(root.status, 200);
+  assert.match(root.raw, /src="\/app\.js"/);
+  const js = await request(server, { path: '/app.js' });
+  assert.equal(js.status, 200);
+  server.close();
+  store.close();
+});
+
+test('设置：可创建多个 API Key，各自可调用业务 API；禁用/删除后立即失效', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const fake = makeFakeAcc();
+  const server = await startServer(store, { accAuth: fake.accAuth });
+  const cookie = cookiesFrom(await loginViaAcc(server, fake));
+
+  const a = await request(server, { method: 'POST', path: '/api/admin/api-keys', headers: { cookie }, body: { label: 'caller-a' } });
+  const b = await request(server, { method: 'POST', path: '/api/admin/api-keys', headers: { cookie }, body: { label: 'caller-b' } });
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  assert.notEqual(a.json.data.apiKey, b.json.data.apiKey);
+
+  const list = await request(server, { path: '/api/admin/api-keys', headers: { cookie } });
+  assert.equal(list.json.data.length, 2);
+  assert.equal(list.json.data[0].createdBy, 'acc:boss@example.com');
+  assert.ok(!JSON.stringify(list.json).includes(a.json.data.apiKey), '列表不得返回完整 key');
+
+  // 未配置供应商时，合法 key 走到 500（说明鉴权已通过）；无效 key 401
+  const callWith = (k) => request(server, { method: 'POST', path: '/api/v1/process', headers: { authorization: 'Bearer ' + k }, body: { text: 'hi' } });
+  assert.equal((await callWith(a.json.data.apiKey)).status, 500);
+  assert.equal((await callWith(b.json.data.apiKey)).status, 500);
+  assert.equal((await callWith('wr_live_bogus')).status, 401);
+
+  // 重命名
+  const ren = await request(server, { method: 'PUT', path: '/api/admin/api-keys/' + a.json.data.id, headers: { cookie }, body: { label: 'caller-a2' } });
+  assert.equal(ren.status, 200);
+
+  // 禁用 a → a 401，b 不受影响
+  await request(server, { method: 'PUT', path: '/api/admin/api-keys/' + a.json.data.id, headers: { cookie }, body: { enabled: false } });
+  assert.equal((await callWith(a.json.data.apiKey)).status, 401);
+  assert.equal((await callWith(b.json.data.apiKey)).status, 500);
+
+  // 删除 b → b 401
+  await request(server, { method: 'DELETE', path: '/api/admin/api-keys/' + b.json.data.id, headers: { cookie } });
+  assert.equal((await callWith(b.json.data.apiKey)).status, 401);
+
+  // 不存在的 id → 404；空名称 → 400
+  assert.equal((await request(server, { method: 'DELETE', path: '/api/admin/api-keys/key_nope', headers: { cookie } })).status, 404);
+  assert.equal((await request(server, { method: 'POST', path: '/api/admin/api-keys', headers: { cookie }, body: { label: '  ' } })).status, 400);
+
   server.close();
   store.close();
 });

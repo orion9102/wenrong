@@ -8,7 +8,7 @@ const API = '/api/admin';
 
 const state = {
   route: 'dashboard',
-  username: null
+  user: null
 };
 
 function el(tag, attrs = {}, children = []) {
@@ -40,6 +40,9 @@ async function api(path, options = {}) {
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    renderLogin(document.getElementById('app'));
+  }
   if (!res.ok || data.success === false) {
     const msg = (data && (data.message || (data.error && data.error.message))) || ('HTTP ' + res.status);
     const err = new Error(msg);
@@ -55,96 +58,35 @@ function fmtTime(ms) {
   return new Date(ms).toLocaleString('zh-CN', { hour12: false });
 }
 
-// ---------------- 登录 / 初始化 ----------------
+// ---------------- 登录 ----------------
 
 async function boot() {
   const root = document.getElementById('app');
   root.innerHTML = '';
-
-  let bootstrap;
   try {
-    bootstrap = await api('/bootstrap-status');
-  } catch (err) {
-    root.appendChild(el('div', { class: 'loading' }, '无法连接服务：' + err.message));
-    return;
-  }
-
-  if (bootstrap.needsSetup) {
-    renderSetup(root);
-    return;
-  }
-
-  try {
-    const me = await api('/me');
-    state.username = me.adminId;
+    const res = await fetch('/api/auth/me', { credentials: 'same-origin' });
+    if (res.status === 401) {
+      renderLogin(root);
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error((data && data.message) || 'HTTP ' + res.status);
+    state.user = data.user;
     renderApp(root);
   } catch (err) {
-    renderLogin(root);
+    root.appendChild(el('div', { class: 'loading' }, '无法连接服务：' + err.message));
   }
-}
-
-function renderSetup(root) {
-  const errorBox = el('div', { class: 'error', style: 'display:none' });
-  const usernameInput = el('input', { type: 'text', placeholder: '设置管理员用户名' });
-  const passwordInput = el('input', { type: 'password', placeholder: '设置密码（至少8位）' });
-
-  const submit = async () => {
-    errorBox.style.display = 'none';
-    try {
-      await api('/bootstrap', { method: 'POST', body: { username: usernameInput.value, password: passwordInput.value } });
-      toast('管理员账号创建成功，请登录');
-      boot();
-    } catch (err) {
-      errorBox.textContent = err.message;
-      errorBox.style.display = 'block';
-    }
-  };
-
-  root.appendChild(
-    el('div', { class: 'login-wrap' }, [
-      el('div', { class: 'login-box' }, [
-        el('h1', {}, '🦞 文镕 WenRong'),
-        el('p', {}, '首次启动：创建管理员账号'),
-        errorBox,
-        el('label', {}, '用户名'),
-        usernameInput,
-        el('label', {}, '密码'),
-        passwordInput,
-        el('button', { onclick: submit, style: 'width:100%' }, '创建账号')
-      ])
-    ])
-  );
 }
 
 function renderLogin(root) {
   root.innerHTML = '';
-  const errorBox = el('div', { class: 'error', style: 'display:none' });
-  const usernameInput = el('input', { type: 'text', placeholder: '用户名' });
-  const passwordInput = el('input', { type: 'password', placeholder: '密码' });
-
-  const submit = async () => {
-    errorBox.style.display = 'none';
-    try {
-      await api('/login', { method: 'POST', body: { username: usernameInput.value, password: passwordInput.value } });
-      boot();
-    } catch (err) {
-      errorBox.textContent = err.message;
-      errorBox.style.display = 'block';
-    }
-  };
-  passwordInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
-
   root.appendChild(
     el('div', { class: 'login-wrap' }, [
       el('div', { class: 'login-box' }, [
         el('h1', {}, '🦞 文镕 WenRong'),
-        el('p', {}, '通用翻译润色服务 · 管理后台'),
-        errorBox,
-        el('label', {}, '用户名'),
-        usernameInput,
-        el('label', {}, '密码'),
-        passwordInput,
-        el('button', { onclick: submit, style: 'width:100%' }, '登录')
+        el('p', {}, '通用翻译润色服务 · 管理台'),
+        el('a', { class: 'btn-link', href: '/api/auth/login', style: 'width:100%' }, '使用统一账号中心登录'),
+        el('p', { class: 'muted', style: 'margin-top:14px;font-size:12px' }, '登录由 acc.909939.xyz 提供，仅管理员账号可进入')
       ])
     ])
   );
@@ -154,28 +96,32 @@ function renderLogin(root) {
 
 function renderApp(root) {
   root.innerHTML = '';
-  const nav = ['dashboard', 'playground', 'prompts', 'providers', 'apikeys', 'logs'];
-  const labels = { dashboard: '概览', playground: 'Playground', prompts: 'Prompt 配置', providers: 'LLM 供应商', apikeys: 'API Key', logs: '调用日志' };
+  const nav = ['dashboard', 'playground', 'prompts', 'providers', 'logs', 'settings'];
+  const labels = { dashboard: '概览', playground: 'Playground', prompts: 'Prompt 配置', providers: 'LLM 供应商', logs: '调用日志', settings: '设置' };
+  if (!nav.includes(state.route)) state.route = 'dashboard';
 
+  const userName = state.user ? state.user.name || state.user.email || state.user.sub : '';
   const sidebar = el('div', { class: 'sidebar', style: 'position:relative' }, [
     el('div', { class: 'brand' }, ['文镕 WenRong', el('small', {}, '通用翻译润色服务')]),
     el(
       'nav',
       {},
       nav.map((r) =>
-        el('a', { class: r === state.route ? 'active' : '', onclick: () => { state.route = r; renderApp(root); } }, labels[r])
+        el('a', { class: r === state.route ? 'active' : '', href: '#' + r, onclick: (e) => { e.preventDefault(); state.route = r; location.hash = r; renderApp(root); } }, labels[r])
       )
     ),
-    el('div', { class: 'logout', onclick: async () => { await api('/logout', { method: 'POST' }); boot(); } }, '退出登录')
+    el('div', { class: 'logout' }, [
+      el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:6px;word-break:break-all' }, userName),
+      el('a', { href: '#', onclick: async (e) => { e.preventDefault(); await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }); boot(); } }, '退出登录')
+    ])
   ]);
 
   const main = el('main', { class: 'main' });
-  sidebar.style.position = 'relative';
 
   root.appendChild(sidebar);
   root.appendChild(main);
 
-  const renderers = { dashboard: renderDashboard, playground: renderPlayground, prompts: renderPrompts, providers: renderProviders, apikeys: renderApiKeys, logs: renderLogs };
+  const renderers = { dashboard: renderDashboard, playground: renderPlayground, prompts: renderPrompts, providers: renderProviders, logs: renderLogs, settings: renderSettings };
   renderers[state.route](main);
 }
 
@@ -485,47 +431,94 @@ async function renderProviders(main) {
   await reload();
 }
 
-// ---------------- API Key 管理 ----------------
+// ---------------- 设置（账号信息 + API Key 管理） ----------------
+
+async function renderSettings(main) {
+  main.innerHTML = '';
+  main.appendChild(el('h1', {}, '设置'));
+
+  const u = state.user || {};
+  main.appendChild(
+    el('div', { class: 'card' }, [
+      el('h2', {}, '当前账号'),
+      el('div', {}, [el('span', { class: 'muted' }, '名称：'), u.name || '-']),
+      el('div', {}, [el('span', { class: 'muted' }, '邮箱：'), u.email || '-']),
+      el('div', {}, [el('span', { class: 'muted' }, '角色：'), u.role || '-']),
+      el('div', { class: 'muted', style: 'margin-top:8px;font-size:12px' }, '账号由统一账号中心 acc.909939.xyz 管理')
+    ])
+  );
+
+  const section = el('div');
+  main.appendChild(section);
+  await renderApiKeys(section);
+}
 
 async function renderApiKeys(main) {
   main.innerHTML = '';
-  main.appendChild(el('h1', {}, 'API Key 管理'));
+  main.appendChild(el('h2', { style: 'margin-top:8px' }, 'API Key 管理'));
+  main.appendChild(
+    el('p', { class: 'muted' }, [
+      '外部调用文镕 API 时需携带请求头 ',
+      el('code', {}, 'Authorization: Bearer <API_KEY>'),
+      '。可为每个调用方单独创建 Key，随时禁用或删除，互不影响。'
+    ])
+  );
 
   const revealBox = el('div', { style: 'display:none' });
-  const labelInput = el('input', { type: 'text', placeholder: '调用方标识，如 apkpure-crawler' });
+  const labelInput = el('input', { type: 'text', maxlength: '64', placeholder: '名称/调用方标识，如 apkpure-crawler', 'aria-label': 'API Key 名称' });
 
-  const createBtn = el('button', {
-    onclick: async () => {
-      if (!labelInput.value.trim()) { toast('请输入标签', 'error'); return; }
-      try {
-        const { data } = await api('/api-keys', { method: 'POST', body: { label: labelInput.value.trim() } });
-        revealBox.style.display = 'block';
-        revealBox.innerHTML = '';
-        revealBox.appendChild(
-          el('div', { class: 'key-reveal' }, [
-            el('div', { class: 'muted' }, '新密钥仅在此展示一次，请立即保存：'),
-            el('div', { class: 'mono', style: 'margin-top:6px' }, data.apiKey)
-          ])
-        );
-        labelInput.value = '';
-        reload();
-      } catch (err) {
-        toast('创建失败：' + err.message, 'error');
-      }
+  const create = async () => {
+    const label = labelInput.value.trim();
+    if (!label) { toast('请输入名称', 'error'); return; }
+    try {
+      const { data } = await api('/api-keys', { method: 'POST', body: { label } });
+      revealBox.style.display = 'block';
+      revealBox.innerHTML = '';
+      const keyText = el('div', { class: 'mono', style: 'margin-top:6px;word-break:break-all' }, data.apiKey);
+      const copyBtn = el('button', {
+        class: 'secondary',
+        style: 'margin-top:8px',
+        onclick: async () => {
+          try { await navigator.clipboard.writeText(data.apiKey); toast('已复制'); } catch (e) { toast('复制失败，请手动选择复制', 'error'); }
+        }
+      }, '复制');
+      revealBox.appendChild(
+        el('div', { class: 'key-reveal', role: 'status' }, [
+          el('div', { class: 'muted' }, `「${data.label}」的密钥仅在此展示一次，请立即保存：`),
+          keyText,
+          copyBtn
+        ])
+      );
+      labelInput.value = '';
+      reload();
+    } catch (err) {
+      toast('创建失败：' + err.message, 'error');
     }
-  }, '生成新 Key');
+  };
+  labelInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') create(); });
 
-  main.appendChild(el('div', { class: 'card' }, [el('h2', {}, '新增 API Key'), labelInput, createBtn, revealBox]));
+  main.appendChild(el('div', { class: 'card' }, [el('h2', {}, '新增 API Key'), labelInput, el('button', { onclick: create }, '生成新 Key'), revealBox]));
 
   const listCard = el('div', { class: 'card' }, '加载中…');
   main.appendChild(listCard);
 
   async function reload() {
-    const { data: keys } = await api('/api-keys');
+    let keys;
+    try {
+      ({ data: keys } = await api('/api-keys'));
+    } catch (err) {
+      listCard.innerHTML = '';
+      listCard.appendChild(el('div', { class: 'muted' }, '加载失败：' + err.message));
+      return;
+    }
     listCard.innerHTML = '';
-    listCard.appendChild(el('h2', {}, '已创建的 Key'));
+    listCard.appendChild(el('h2', {}, `已创建的 Key（${keys.length}）`));
+    if (!keys.length) {
+      listCard.appendChild(el('div', { class: 'muted' }, '还没有 API Key，外部调用将全部被拒绝（401）。'));
+      return;
+    }
     const table = el('table', {}, [
-      el('thead', {}, el('tr', {}, [el('th', {}, '标签'), el('th', {}, '前缀'), el('th', {}, '状态'), el('th', {}, '创建时间'), el('th', {}, '最后使用'), el('th', {}, '操作')])),
+      el('thead', {}, el('tr', {}, [el('th', {}, '名称'), el('th', {}, '前缀'), el('th', {}, '状态'), el('th', {}, '创建者'), el('th', {}, '创建时间'), el('th', {}, '最后使用'), el('th', {}, '操作')])),
       el(
         'tbody',
         {},
@@ -534,11 +527,31 @@ async function renderApiKeys(main) {
             el('td', {}, k.label),
             el('td', { class: 'mono' }, k.keyPrefix),
             el('td', {}, el('span', { class: 'badge ' + (k.enabled ? 'success' : 'disabled') }, k.enabled ? '启用' : '禁用')),
+            el('td', {}, (k.createdBy || '-').replace(/^acc:/, '')),
             el('td', {}, fmtTime(k.createdAt)),
             el('td', {}, fmtTime(k.lastUsedAt)),
             el('td', { class: 'flex-row' }, [
-              el('button', { class: 'secondary', onclick: async () => { await api(`/api-keys/${k.id}`, { method: 'PUT', body: { enabled: !k.enabled } }); reload(); } }, k.enabled ? '吊销' : '启用'),
-              el('button', { class: 'danger', onclick: async () => { if (confirm('确定删除此 Key？')) { await api(`/api-keys/${k.id}`, { method: 'DELETE' }); reload(); } } }, '删除')
+              el('button', {
+                class: 'secondary',
+                onclick: async () => {
+                  const name = prompt('新的名称', k.label);
+                  if (name === null || !name.trim()) return;
+                  try { await api(`/api-keys/${k.id}`, { method: 'PUT', body: { label: name.trim() } }); reload(); } catch (err) { toast(err.message, 'error'); }
+                }
+              }, '重命名'),
+              el('button', {
+                class: 'secondary',
+                onclick: async () => {
+                  try { await api(`/api-keys/${k.id}`, { method: 'PUT', body: { enabled: !k.enabled } }); reload(); } catch (err) { toast(err.message, 'error'); }
+                }
+              }, k.enabled ? '禁用' : '启用'),
+              el('button', {
+                class: 'danger',
+                onclick: async () => {
+                  if (!confirm(`确定删除「${k.label}」？使用该 Key 的调用方将立即无法访问。`)) return;
+                  try { await api(`/api-keys/${k.id}`, { method: 'DELETE' }); reload(); } catch (err) { toast(err.message, 'error'); }
+                }
+              }, '删除')
             ])
           ])
         )
@@ -582,4 +595,6 @@ async function renderLogs(main) {
   listCard.appendChild(table);
 }
 
+const initialRoute = location.hash.replace(/^#/, '');
+if (initialRoute) state.route = initialRoute;
 boot();
