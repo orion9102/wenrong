@@ -20,8 +20,9 @@ function el(tag, attrs = {}, children = []) {
     else node.setAttribute(k, v);
   }
   for (const c of [].concat(children)) {
-    if (c === null || c === undefined) continue;
-    node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    if (c === null || c === undefined || c === false) continue;
+    // 数字、布尔等非 Node 值统一转字符串，避免 appendChild 报错
+    node.appendChild(typeof c === 'object' && c.nodeType ? c : document.createTextNode(String(c)));
   }
   return node;
 }
