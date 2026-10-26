@@ -679,3 +679,32 @@ test('/readyz：无可用供应商 503，配好后 200；/api/v1/health 带 vers
   server.close();
   store.close();
 });
+
+test('GET /api/v1/openapi.json 返回与实际契约一致的文档', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const server = await startServer(store);
+  const res = await request(server, { method: 'GET', path: '/api/v1/openapi.json' });
+  assert.equal(res.status, 200);
+  const doc = res.json;
+  // 基本结构
+  assert.equal(doc.openapi, '3.0.3');
+  assert.ok(doc.info.title.includes('WenRong'));
+  assert.ok(doc.paths['/api/v1/process']);
+  assert.ok(doc.paths['/api/v1/process'].post.security);
+  // 请求字段与 validateOptions 实际支持的一致
+  const props = doc.components.schemas.ProcessRequest.properties;
+  for (const f of ['text', 'prompt', 'instruction', 'targetLang', 'glossary', 'temperature', 'providerId']) {
+    assert.ok(props[f], '缺少字段 ' + f);
+  }
+  assert.deepEqual(doc.components.schemas.ProcessRequest.required, ['text']);
+  // 错误码枚举与 README 错误码表一致
+  const codes = doc.paths['/api/v1/process'].post.responses[400].content['application/json'].schema.properties.error.properties.code.enum;
+  for (const c of ['INVALID_REQUEST', 'MALFORMED_JSON', 'UNAUTHORIZED', 'PROVIDER_NOT_FOUND', 'IDEMPOTENCY_CONFLICT', 'TEXT_TOO_LONG', 'BODY_TOO_LARGE', 'RATE_LIMITED', 'UPSTREAM_RATE_LIMITED', 'LLM_UPSTREAM_ERROR', 'INTERNAL_ERROR']) {
+    assert.ok(codes.includes(c), '错误码表缺少 ' + c);
+  }
+  // temperature 的取值范围与校验一致（0～1）
+  assert.equal(props.temperature.minimum, 0);
+  assert.equal(props.temperature.maximum, 1);
+  server.close();
+  store.close();
+});

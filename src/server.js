@@ -52,6 +52,136 @@ const MIME = {
   '.ico': 'image/x-icon'
 };
 
+/**
+ * OpenAPI 3.0 文档：与 /api/v1/process 实际契约保持一致（字段、错误码、响应头）。
+ * 单独成函数便于测试断言，不引入任何依赖。
+ */
+function buildOpenApiDocument() {
+  const processSchema = {
+    type: 'object',
+    required: ['text'],
+    properties: {
+      text: { type: 'string', description: '待处理文本；受后台配置的最大长度/估算 token 限制（默认 20000 字符 / 8000 token）' },
+      prompt: { type: 'string', description: '自定义 prompt，整体覆盖默认翻译润色行为' },
+      instruction: { type: 'string', maxLength: 1000, description: '附加要求，叠加在提示词之后' },
+      targetLang: { type: 'string', enum: ['zh', 'zh-Hant', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'pt', 'it', 'ru', 'vi', 'th', 'ar'], description: '目标语言，默认 zh' },
+      glossary: { type: 'object', description: '术语表 token→词元，最多 100 条', additionalProperties: { type: 'string' } },
+      temperature: { type: 'number', minimum: 0, maximum: 1, description: '采样温度，默认 0.2；上游对 temperature 的支持程度不同，不保证确定性输出' },
+      providerId: { type: 'string', description: '指定供应商 ID，不传用默认供应商' }
+    }
+  };
+  const successData = {
+    type: 'object',
+    properties: {
+      result: { type: 'string' },
+      usedPrompt: { type: 'string' },
+      promptVersion: { type: 'string' },
+      detectedLang: { type: 'string' },
+      targetLang: { type: 'string', nullable: true },
+      model: { type: 'string' },
+      usage: {
+        type: 'object',
+        properties: {
+          promptTokens: { type: 'integer' },
+          completionTokens: { type: 'integer' },
+          totalTokens: { type: 'integer' }
+        }
+      },
+      latencyMs: { type: 'integer' }
+    }
+  };
+  const errorBody = {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean', enum: [false] },
+      error: {
+        type: 'object',
+        properties: {
+          code: {
+            type: 'string',
+            enum: ['INVALID_REQUEST', 'MALFORMED_JSON', 'UNAUTHORIZED', 'PROVIDER_NOT_FOUND', 'IDEMPOTENCY_CONFLICT', 'TEXT_TOO_LONG', 'BODY_TOO_LARGE', 'RATE_LIMITED', 'UPSTREAM_RATE_LIMITED', 'LLM_UPSTREAM_ERROR', 'INTERNAL_ERROR']
+          },
+          message: { type: 'string' },
+          retryable: { type: 'boolean' },
+          field: { type: 'string', description: '参数错误时指向问题字段' },
+          limit: { type: 'integer', description: 'TEXT_TOO_LONG 时的上限' },
+          actualLength: { type: 'integer', description: 'TEXT_TOO_LONG 时的实际值' },
+          unit: { type: 'string', enum: ['chars', 'estimated_tokens'] }
+        }
+      },
+      requestId: { type: 'string' }
+    }
+  };
+  const jsonResponse = (schema, description) => ({
+    description,
+    content: { 'application/json': { schema } },
+    headers: {
+      'X-Request-Id': { schema: { type: 'string' }, description: '本次请求 ID' },
+      'X-RateLimit-Limit': { schema: { type: 'integer' }, description: '限流窗口内允许的总次数' },
+      'X-RateLimit-Remaining': { schema: { type: 'integer' }, description: '窗口内剩余次数' },
+      'X-RateLimit-Reset': { schema: { type: 'integer' }, description: '窗口重置时间（Unix 秒）' }
+    }
+  });
+  return {
+    openapi: '3.0.3',
+    info: {
+      title: 'WenRong 文镕 API',
+      version: SERVICE_VERSION,
+      description: '通用翻译润色服务：输入 text（可选 prompt 与附加选项），返回 LLM 处理后的文本。仅限后端服务调用，不开放 CORS。'
+    },
+    servers: [{ url: '/', description: '当前实例' }],
+    paths: {
+      '/api/v1/process': {
+        post: {
+          operationId: 'process',
+          summary: '翻译/润色一段文本',
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            { name: 'Idempotency-Key', in: 'header', required: false, schema: { type: 'string', minLength: 8, maxLength: 128 }, description: '同一 Key 同一内容 24 小时内回放；内容冲突返回 409' },
+            { name: 'X-Request-Id', in: 'header', required: false, schema: { type: 'string', minLength: 8, maxLength: 80 }, description: '调用方请求 ID，原样返回' }
+          ],
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ProcessRequest' } } }
+          },
+          responses: {
+            200: jsonResponse({
+              type: 'object',
+              properties: {
+                success: { type: 'boolean', enum: [true] },
+                data: successData,
+                requestId: { type: 'string' },
+                idempotentReplay: { type: 'boolean', description: '幂等回放时为 true' }
+              }
+            }, '处理成功'),
+            400: jsonResponse(errorBody, '参数错误（INVALID_REQUEST / MALFORMED_JSON / PROVIDER_NOT_FOUND）'),
+            401: jsonResponse(errorBody, 'API Key 缺失或无效（UNAUTHORIZED）'),
+            409: jsonResponse(errorBody, '同一 Idempotency-Key 用于不同内容（IDEMPOTENCY_CONFLICT）'),
+            413: jsonResponse(errorBody, '文本超限（TEXT_TOO_LONG / BODY_TOO_LARGE）'),
+            429: jsonResponse(errorBody, '限流（RATE_LIMITED / UPSTREAM_RATE_LIMITED，带 Retry-After）'),
+            502: jsonResponse(errorBody, '上游 LLM 错误（LLM_UPSTREAM_ERROR）'),
+            503: jsonResponse(errorBody, '上游暂不可用（LLM_UPSTREAM_ERROR，带 Retry-After）'),
+            500: jsonResponse(errorBody, '服务内部错误（INTERNAL_ERROR）')
+          }
+        }
+      },
+      '/api/v1/health': {
+        get: {
+          operationId: 'health',
+          summary: '服务健康与版本信息（无需鉴权）',
+          responses: { 200: jsonResponse({ type: 'object' }, '服务状态') }
+        }
+      }
+    },
+    components: {
+      securitySchemes: {
+        bearerAuth: { type: 'http', scheme: 'bearer', description: '管理台签发的 API Key' }
+      },
+      schemas: { ProcessRequest: processSchema }
+    }
+  };
+}
+
 function requestIdOf(req) {
   const incoming = req.headers['x-request-id'];
   if (typeof incoming === 'string' && /^[A-Za-z0-9._:-]{8,80}$/.test(incoming)) return incoming.slice(0, 80);
@@ -222,6 +352,10 @@ function createServer(options = {}) {
         return;
       }
 
+      if (pathname === '/api/v1/openapi.json' && req.method === 'GET') {
+        sendJson(res, 200, buildOpenApiDocument());
+        return;
+      }
       if (pathname === '/api/v1/process' && req.method === 'POST') {
         await handleProcess(req, res);
         return;
@@ -505,4 +639,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { createServer, sendJson, sendApiError, DEFAULT_PORT, SERVICE_VERSION };
+module.exports = { createServer, sendJson, sendApiError, buildOpenApiDocument, DEFAULT_PORT, SERVICE_VERSION };

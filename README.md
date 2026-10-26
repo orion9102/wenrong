@@ -119,6 +119,8 @@ curl -X POST http://localhost:4090/api/v1/process \
 `IDEMPOTENCY_CONFLICT` (409) · `TEXT_TOO_LONG` (413) · `BODY_TOO_LARGE` (413，>2 MB) · `RATE_LIMITED` (429) ·
 `UPSTREAM_RATE_LIMITED` (429，上游限流) · `LLM_UPSTREAM_ERROR` (502/503) · `INTERNAL_ERROR` (500)
 
+机器可读的接口定义见 `GET /api/v1/openapi.json`（OpenAPI 3.0，无需鉴权），可直接导入 Swagger UI / Postman / openapi-generator。
+
 > 只能从后端服务调用。不要在浏览器、小程序或 App 里直接带 API Key 调用：Key 会暴露，服务也不开放 CORS。
 
 ### 探活：GET /healthz、GET /readyz、GET /api/v1/health
