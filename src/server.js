@@ -21,17 +21,27 @@ const crypto = require('node:crypto');
 
 const { Store } = require('./store.js');
 const { chatComplete, LlmUpstreamError } = require('./llm-client.js');
-const { buildMessages } = require('./prompt-engine.js');
+const { buildMessages, validateOptions } = require('./prompt-engine.js');
 const { RateLimiter } = require('./rate-limiter.js');
 const { hashApiKey, randomId } = require('./crypto.js');
 const { handleAdminRoute, handleAuthRoute } = require('./admin-routes.js');
 const { createAccAuth } = require('./acc-auth.js');
-const { stripDuplicateGloss, estimateTokens, promptFingerprint } = require('./text-policy.js');
+const { stripDuplicateGloss, estimateTokens, promptFingerprint, detectLang } = require('./text-policy.js');
 
 const WEB_DIR = path.join(__dirname, '..', 'web');
 const DEFAULT_PORT = 4090;
 const DEFAULT_MAX_TEXT_LENGTH = 20000;
 const DEFAULT_MAX_TEXT_TOKENS = 8000;
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
+const SERVICE_VERSION = (() => {
+  try {
+    return require('../package.json').version;
+  } catch (err) {
+    return 'unknown';
+  }
+})();
+// 哪些 HTTP 状态值得调用方重试（配合 Retry-After 退避）
+const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -64,34 +74,50 @@ function sendJson(res, status, body, headers = {}) {
   res.end(payload);
 }
 
-function sendApiError(res, status, code, message, requestId, headers = {}) {
-  sendJson(res, status, { success: false, error: { code, message }, requestId: requestId || null }, headers);
+/**
+ * 统一错误体：{ success:false, error:{ code, message, retryable, ...details }, requestId }
+ * retryable 默认按状态码推断，调用方不必自己维护一张状态码表。
+ */
+function sendApiError(res, status, code, message, requestId, headers = {}, details = {}) {
+  const error = Object.assign({ code, message, retryable: RETRYABLE_STATUS.has(status) }, details);
+  sendJson(res, status, { success: false, error, requestId: requestId || null }, headers);
 }
 
-function readJsonBody(req, { maxBytes = 2 * 1024 * 1024 } = {}) {
+function readJsonBody(req, { maxBytes = MAX_BODY_BYTES } = {}) {
   return new Promise((resolve, reject) => {
     let total = 0;
+    let tooLarge = false;
     const chunks = [];
     req.on('data', (chunk) => {
+      if (tooLarge) return; // 继续排空请求，不断开连接，保证能回 413
       total += chunk.length;
       if (total > maxBytes) {
-        reject(Object.assign(new Error('请求体过大'), { code: 'bad_request' }));
-        req.destroy();
+        tooLarge = true;
+        chunks.length = 0;
+        reject(Object.assign(new Error(`请求体超过 ${maxBytes} 字节`), { code: 'body_too_large', limit: maxBytes }));
         return;
       }
       chunks.push(chunk);
     });
     req.on('end', () => {
+      if (tooLarge) return;
       const raw = Buffer.concat(chunks).toString('utf8');
       if (!raw) {
         resolve({});
         return;
       }
+      let parsed;
       try {
-        resolve(JSON.parse(raw));
+        parsed = JSON.parse(raw);
       } catch (err) {
-        reject(Object.assign(new Error('请求体不是合法 JSON'), { code: 'bad_request' }));
+        reject(Object.assign(new Error('请求体不是合法 JSON：' + err.message), { code: 'malformed_json' }));
+        return;
       }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        reject(Object.assign(new Error('请求体必须是 JSON 对象'), { code: 'invalid_request' }));
+        return;
+      }
+      resolve(parsed);
     });
     req.on('error', reject);
   });
@@ -174,9 +200,25 @@ function createServer(options = {}) {
         const provider = store.getDefaultProvider();
         sendJson(res, 200, {
           status: 'ok',
+          version: SERVICE_VERSION,
           uptime: process.uptime(),
           defaultProvider: provider ? { id: provider.id, name: provider.name, enabled: provider.enabled } : null
         });
+        return;
+      }
+
+      // 就绪探针：数据库可读、有启用且配了 Key 的默认供应商。不打上游，避免探活产生费用。
+      if (pathname === '/readyz' && req.method === 'GET') {
+        const checks = { database: false, defaultProvider: false };
+        try {
+          checks.database = !!store.getConfig();
+          const p = store.getDefaultProvider({ includeSecret: true });
+          checks.defaultProvider = !!(p && p.enabled && p.apiKey);
+        } catch (err) {
+          /* 保持 false */
+        }
+        const ready = checks.database && checks.defaultProvider;
+        sendJson(res, ready ? 200 : 503, { ready, version: SERVICE_VERSION, checks });
         return;
       }
 
@@ -210,6 +252,8 @@ function createServer(options = {}) {
   async function handleProcess(req, res) {
     const requestId = requestIdOf(req);
     const startedAt = now();
+    // writeHead 会合并 setHeader 的值，所有响应（含错误）都带上
+    res.setHeader('X-Request-Id', requestId);
 
     const apiKeyRaw = getBearerToken(req);
     if (!apiKeyRaw) {
@@ -230,9 +274,12 @@ function createServer(options = {}) {
     }
 
     const rl = rateLimiter.check(apiKeyRecord.id);
+    const resetSec = Math.max(1, Math.ceil((rl.resetMs || 1000) / 1000));
+    res.setHeader('X-RateLimit-Limit', String(rateLimiter.maxRequests));
+    res.setHeader('X-RateLimit-Remaining', String(Math.max(0, rl.remaining)));
+    res.setHeader('X-RateLimit-Reset', String(resetSec));
     if (!rl.allowed) {
-      const retryAfter = Math.max(1, Math.ceil((rl.resetMs || 1000) / 1000));
-      sendApiError(res, 429, 'RATE_LIMITED', '请求过于频繁，请稍后重试', requestId, { 'Retry-After': String(retryAfter) });
+      sendApiError(res, 429, 'RATE_LIMITED', '请求过于频繁，请稍后重试', requestId, { 'Retry-After': String(resetSec) });
       return;
     }
 
@@ -240,7 +287,13 @@ function createServer(options = {}) {
     try {
       body = await readJsonBody(req);
     } catch (err) {
-      sendApiError(res, 400, 'INVALID_REQUEST', err.message, requestId);
+      if (err.code === 'body_too_large') {
+        sendApiError(res, 413, 'BODY_TOO_LARGE', err.message, requestId, {}, { limit: err.limit, unit: 'bytes' });
+      } else if (err.code === 'malformed_json') {
+        sendApiError(res, 400, 'MALFORMED_JSON', err.message, requestId);
+      } else {
+        sendApiError(res, 400, 'INVALID_REQUEST', err.message, requestId);
+      }
       return;
     }
 
@@ -254,18 +307,55 @@ function createServer(options = {}) {
     const maxLen = config.max_text_length || DEFAULT_MAX_TEXT_LENGTH;
     const maxTokens = config.max_text_tokens || DEFAULT_MAX_TEXT_TOKENS;
     if (text.length > maxLen) {
-      sendApiError(res, 413, 'TEXT_TOO_LONG', `文本长度超出限制（上限 ${maxLen} 字符）`, requestId);
+      sendApiError(res, 413, 'TEXT_TOO_LONG', `文本长度超出限制（上限 ${maxLen} 字符）`, requestId, {}, {
+        limit: maxLen,
+        actualLength: text.length,
+        unit: 'chars'
+      });
       return;
     }
     const textTokens = estimateTokens(text);
     if (textTokens > maxTokens) {
-      sendApiError(res, 413, 'TEXT_TOO_LONG', `文本估算超过 ${maxTokens} token（约 ${textTokens}），请拆分后重试`, requestId);
+      sendApiError(res, 413, 'TEXT_TOO_LONG', `文本估算超过 ${maxTokens} token（约 ${textTokens}），请拆分后重试`, requestId, {}, {
+        limit: maxTokens,
+        actualLength: textTokens,
+        unit: 'estimated_tokens'
+      });
       return;
     }
 
+    if (body.prompt !== undefined && body.prompt !== null && typeof body.prompt !== 'string') {
+      sendApiError(res, 400, 'INVALID_REQUEST', 'prompt 必须是字符串', requestId, {}, { field: 'prompt' });
+      return;
+    }
+    const opts = validateOptions(body);
+    if (!opts.ok) {
+      sendApiError(res, 400, 'INVALID_REQUEST', opts.message, requestId, {}, { field: opts.field });
+      return;
+    }
+    const { instruction, targetLang, glossary, temperature } = opts.value;
+
     const requestPrompt = typeof body.prompt === 'string' ? body.prompt : null;
-    const fingerprint = promptFingerprint(config.system_prompt, (requestPrompt && requestPrompt.trim()) || config.default_user_prompt) +
-      ':' + crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);
+    const built = buildMessages({
+      systemPrompt: config.system_prompt,
+      defaultUserPrompt: config.default_user_prompt,
+      requestPrompt,
+      text,
+      instruction,
+      targetLang,
+      glossary
+    });
+    const { usedPrompt, messages } = built;
+    // promptVersion：实际生效的 system + user 提示词指纹，后台改过提示词就会变，便于对账和复现
+    const promptVersion = 'pv_' + promptFingerprint(config.system_prompt, built.effectiveUserPrompt);
+    const fingerprint =
+      promptVersion +
+      ':' +
+      crypto
+        .createHash('sha256')
+        .update(JSON.stringify([text, body.providerId || null, temperature]))
+        .digest('hex')
+        .slice(0, 16);
 
     if (idemKey) {
       const cached = store.getIdempotent(idemKey, apiKeyRecord.id);
@@ -294,15 +384,9 @@ function createServer(options = {}) {
       }
     }
 
-    const { usedPrompt, messages } = buildMessages({
-      systemPrompt: config.system_prompt,
-      defaultUserPrompt: config.default_user_prompt,
-      requestPrompt: typeof body.prompt === 'string' ? body.prompt : null,
-      text
-    });
-
     try {
-      const result = await chatComplete(provider, messages);
+      const callProvider = temperature !== null ? Object.assign({}, provider, { temperature }) : provider;
+      const result = await chatComplete(callProvider, messages);
       const content = stripDuplicateGloss(result.content.trim());
       const latencyMs = now() - startedAt;
       store.insertLog({
@@ -324,6 +408,9 @@ function createServer(options = {}) {
         data: {
           result: content,
           usedPrompt,
+          promptVersion,
+          detectedLang: detectLang(text),
+          targetLang: targetLang || (usedPrompt === 'default_translate_polish' ? 'zh' : null),
           model: result.model,
           usage: {
             promptTokens: result.usage.prompt_tokens || 0,
@@ -355,9 +442,15 @@ function createServer(options = {}) {
       });
       const headers = {};
       if (status === 429 || status === 503) headers['Retry-After'] = String(err.retryAfterSec || 30);
-      sendApiError(res, status, code, err.message, requestId, headers);
+      // 上游明确不可重试（如 400 参数错）时以分类结果为准，不按 502 一律标可重试
+      const details = isUpstream ? { retryable: !!err.retryable || status === 429 || status === 503 } : {};
+      sendApiError(res, status, code, err.message, requestId, headers, details);
     }
   }
+
+  // 同步调用动辄几十秒，空闲连接保持 65s，大于常见代理/客户端的 60s，避免复用时被服务端先关导致 ECONNRESET
+  server.keepAliveTimeout = 65000;
+  server.headersTimeout = 66000;
 
   server.on('clientError', (err, socket) => {
     if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
@@ -412,4 +505,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { createServer, sendJson, sendApiError, DEFAULT_PORT };
+module.exports = { createServer, sendJson, sendApiError, DEFAULT_PORT, SERVICE_VERSION };

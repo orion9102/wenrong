@@ -37,9 +37,36 @@ function estimateTokens(text) {
   return cjk + Math.ceil(other / 4);
 }
 
+/**
+ * 粗略识别原文语言（按文字系统计数，不调模型、不加依赖）。
+ * 只区分文字系统，拉丁字母一律记为 en；结果是启发式的，仅供调用方参考。
+ */
+function detectLang(text) {
+  const s = String(text || '');
+  const n = { han: 0, kana: 0, hangul: 0, cyrillic: 0, arabic: 0, thai: 0, latin: 0 };
+  for (const ch of s) {
+    const c = ch.codePointAt(0);
+    if (c >= 0x3040 && c <= 0x30ff) n.kana += 1;
+    else if ((c >= 0x4e00 && c <= 0x9fff) || (c >= 0x3400 && c <= 0x4dbf)) n.han += 1;
+    else if (c >= 0xac00 && c <= 0xd7af) n.hangul += 1;
+    else if (c >= 0x0400 && c <= 0x04ff) n.cyrillic += 1;
+    else if (c >= 0x0600 && c <= 0x06ff) n.arabic += 1;
+    else if (c >= 0x0e00 && c <= 0x0e7f) n.thai += 1;
+    else if ((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) || (c >= 0xc0 && c <= 0x24f)) n.latin += 1;
+  }
+  const total = Object.values(n).reduce((a, b) => a + b, 0);
+  if (!total) return null;
+  // 日文里汉字很多，只要假名占比明显就判为日文
+  if (n.kana / total > 0.1) return 'ja';
+  // 中文正文常夹英文专名，汉字超过三成就算中文
+  if (n.han / total > 0.3) return 'zh';
+  const [top] = Object.entries(n).sort((a, b) => b[1] - a[1]);
+  return { han: 'zh', kana: 'ja', hangul: 'ko', cyrillic: 'ru', arabic: 'ar', thai: 'th', latin: 'en' }[top[0]];
+}
+
 function promptFingerprint(systemPrompt, userPrompt) {
   const crypto = require('node:crypto');
   return crypto.createHash('sha256').update(String(systemPrompt) + '\n' + String(userPrompt)).digest('hex').slice(0, 12);
 }
 
-module.exports = { stripDuplicateGloss, estimateTokens, promptFingerprint };
+module.exports = { stripDuplicateGloss, estimateTokens, promptFingerprint, detectLang };

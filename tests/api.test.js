@@ -521,3 +521,161 @@ test('本机限流 429 带 Retry-After', async () => {
   server.close();
   store.close();
 });
+
+function rawRequest(server, { method = 'POST', path, headers = {}, raw }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port: server.address().port, method, path, headers: Object.assign({ 'Content-Type': 'application/json' }, headers) },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          let json = null;
+          try { json = JSON.parse(text); } catch (err) { json = null; }
+          resolve({ status: res.statusCode, json, headers: res.headers });
+        });
+      }
+    );
+    req.on('error', reject);
+    req.end(raw);
+  });
+}
+
+test('响应头带 X-Request-Id 与 X-RateLimit-*，错误体带 retryable', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const rawKey = 'wr_live_headers01';
+  store.createApiKey('tester', rawKey, hashApiKey(rawKey));
+  const server = await startServer(store, { rateLimiter: new RateLimiter({ windowMs: 60000, maxRequests: 5 }) });
+  const res = await request(server, { method: 'POST', path: '/api/v1/process', headers: { Authorization: 'Bearer ' + rawKey }, body: {} });
+  assert.equal(res.status, 400);
+  assert.equal(res.headers['x-request-id'], res.json.requestId);
+  assert.equal(res.headers['x-ratelimit-limit'], '5');
+  assert.equal(res.headers['x-ratelimit-remaining'], '4');
+  assert.ok(Number(res.headers['x-ratelimit-reset']) > 0);
+  assert.equal(res.json.error.retryable, false);
+  server.close();
+  store.close();
+});
+
+test('非法 JSON 返回 MALFORMED_JSON，超大请求体返回 413 BODY_TOO_LARGE', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const rawKey = 'wr_live_bodyerr01';
+  store.createApiKey('tester', rawKey, hashApiKey(rawKey));
+  const server = await startServer(store);
+  const bad = await rawRequest(server, { path: '/api/v1/process', headers: { Authorization: 'Bearer ' + rawKey }, raw: '{"text": ' });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.json.error.code, 'MALFORMED_JSON');
+  const big = await rawRequest(server, {
+    path: '/api/v1/process',
+    headers: { Authorization: 'Bearer ' + rawKey },
+    raw: JSON.stringify({ text: 'a'.repeat(2 * 1024 * 1024 + 10) })
+  });
+  assert.equal(big.status, 413);
+  assert.equal(big.json.error.code, 'BODY_TOO_LARGE');
+  assert.equal(big.json.error.unit, 'bytes');
+  server.close();
+  store.close();
+});
+
+test('TEXT_TOO_LONG 返回 limit / actualLength / unit', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  store.updateConfig({ maxTextLength: 10 });
+  const rawKey = 'wr_live_toolong01';
+  store.createApiKey('tester', rawKey, hashApiKey(rawKey));
+  const server = await startServer(store);
+  const res = await request(server, { method: 'POST', path: '/api/v1/process', headers: { Authorization: 'Bearer ' + rawKey }, body: { text: 'x'.repeat(25) } });
+  assert.equal(res.status, 413);
+  assert.deepEqual([res.json.error.limit, res.json.error.actualLength, res.json.error.unit], [10, 25, 'chars']);
+  server.close();
+  store.close();
+});
+
+test('可选字段校验：targetLang / glossary / temperature / instruction', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const rawKey = 'wr_live_optval01';
+  store.createApiKey('tester', rawKey, hashApiKey(rawKey));
+  const server = await startServer(store);
+  const call = (extra) => request(server, { method: 'POST', path: '/api/v1/process', headers: { Authorization: 'Bearer ' + rawKey }, body: Object.assign({ text: 'hi' }, extra) });
+  assert.equal((await call({ targetLang: 'xx' })).json.error.field, 'targetLang');
+  assert.equal((await call({ glossary: ['a'] })).json.error.field, 'glossary');
+  assert.equal((await call({ temperature: 3 })).json.error.field, 'temperature');
+  assert.equal((await call({ instruction: 1 })).json.error.field, 'instruction');
+  assert.equal((await call({ prompt: 1 })).json.error.field, 'prompt');
+  server.close();
+  store.close();
+});
+
+test('成功响应带 promptVersion / detectedLang / targetLang，并把追加层与 temperature 传给上游', async () => {
+  let seen = null;
+  const upstream = await fakeUpstream((req, raw, res) => {
+    seen = JSON.parse(raw);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ model: 'fake-model', choices: [{ message: { content: 'Bonjour' } }], usage: {} }));
+  });
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const rawKey = withProvider(store, 'http://127.0.0.1:' + upstream.address().port);
+  const server = await startServer(store);
+  const res = await request(server, {
+    method: 'POST',
+    path: '/api/v1/process',
+    headers: { Authorization: 'Bearer ' + rawKey },
+    body: { text: 'Hello world', targetLang: 'fr', glossary: { world: 'monde' }, instruction: '保持简短', temperature: 0 }
+  });
+  assert.equal(res.status, 200);
+  assert.match(res.json.data.promptVersion, /^pv_[0-9a-f]{12}$/);
+  assert.equal(res.json.data.detectedLang, 'en');
+  assert.equal(res.json.data.targetLang, 'fr');
+  assert.equal(res.json.data.usedPrompt, 'default_translate_polish');
+  assert.equal(seen.temperature, 0);
+  const user = seen.messages[1].content;
+  assert.match(user, /Français（fr）/);
+  assert.match(user, /- world → monde/);
+  assert.match(user, /保持简短/);
+
+  // 不带追加层时 promptVersion 不同（追加层计入版本）
+  const plain = await request(server, { method: 'POST', path: '/api/v1/process', headers: { Authorization: 'Bearer ' + rawKey }, body: { text: 'Hello world' } });
+  assert.notEqual(plain.json.data.promptVersion, res.json.data.promptVersion);
+  assert.equal(plain.json.data.targetLang, 'zh');
+  server.close();
+  upstream.close();
+  store.close();
+});
+
+test('上游 400 不标 retryable，上游 500 标 retryable', async () => {
+  let code = 400;
+  const upstream = await fakeUpstream((req, raw, res) => {
+    res.writeHead(code, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'x' } }));
+  });
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const rawKey = withProvider(store, 'http://127.0.0.1:' + upstream.address().port);
+  const server = await startServer(store);
+  const call = () => request(server, { method: 'POST', path: '/api/v1/process', headers: { Authorization: 'Bearer ' + rawKey }, body: { text: 'hi' } });
+  const r400 = await call();
+  assert.equal(r400.status, 502);
+  assert.equal(r400.json.error.retryable, false);
+  code = 500;
+  const r500 = await call();
+  assert.equal(r500.json.error.retryable, true);
+  server.close();
+  upstream.close();
+  store.close();
+});
+
+test('/readyz：无可用供应商 503，配好后 200；/api/v1/health 带 version', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const server = await startServer(store);
+  const notReady = await request(server, { path: '/readyz' });
+  assert.equal(notReady.status, 503);
+  assert.equal(notReady.json.checks.database, true);
+  assert.equal(notReady.json.checks.defaultProvider, false);
+  withProvider(store, 'http://127.0.0.1:9');
+  const ready = await request(server, { path: '/readyz' });
+  assert.equal(ready.status, 200);
+  const health = await request(server, { path: '/api/v1/health' });
+  assert.equal(health.json.version, require('../package.json').version);
+  assert.equal(server.keepAliveTimeout, 65000);
+  server.close();
+  store.close();
+});

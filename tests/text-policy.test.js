@@ -17,3 +17,13 @@ test('estimateTokens 中文按字计、英文按四字符计', () => {
   assert.equal(estimateTokens('abcd'), 1);
   assert.equal(estimateTokens(''), 0);
 });
+
+const { detectLang } = require('../src/text-policy.js');
+test('detectLang 按文字系统粗判语言', () => {
+  assert.equal(detectLang('Hello world'), 'en');
+  assert.equal(detectLang('OpenAI 发布了新模型'), 'zh');
+  assert.equal(detectLang('こんにちは世界'), 'ja');
+  assert.equal(detectLang('안녕하세요'), 'ko');
+  assert.equal(detectLang('Привет мир'), 'ru');
+  assert.equal(detectLang('123 !!'), null);
+});

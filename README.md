@@ -76,6 +76,9 @@ curl -X POST http://localhost:4090/api/v1/process \
   "data": {
     "result": "这是一段示例段落。",
     "usedPrompt": "default_translate_polish",
+    "promptVersion": "pv_3f9a1c2b7d4e",
+    "detectedLang": "en",
+    "targetLang": "zh",
     "model": "claude-sonnet-4-5",
     "usage": { "promptTokens": 42, "completionTokens": 18, "totalTokens": 60 },
     "latencyMs": 820
@@ -90,15 +93,37 @@ curl -X POST http://localhost:4090/api/v1/process \
 { "text": "...", "prompt": "将下面内容改写为吸引点击的中文标题，不超过20字" }
 ```
 
+可选字段（都叠加在提示词之后，不替换默认翻译润色）：
+
+| 字段 | 说明 |
+|---|---|
+| `instruction` | 附加要求，≤1000 字，例如「语气更口语」 |
+| `targetLang` | 目标语言，默认 `zh`；可选 zh、zh-Hant、en、ja、ko、fr、de、es、pt、it、ru、vi、th、ar |
+| `glossary` | 术语表 `{"token":"词元"}`，最多 100 条 |
+| `temperature` | 0～1，默认 0.2 |
+
+```json
+{ "text": "Hello world", "targetLang": "fr", "glossary": { "world": "monde" }, "instruction": "保持简短" }
+```
+
+响应里 `promptVersion` 是实际生效提示词的指纹（后台改提示词后会变），`detectedLang` 是按文字系统粗判的原文语言。
+
 可选请求头：`Idempotency-Key`（8～128 位，同一 Key 同一内容 24 小时内回放，内容冲突返回 409）；`X-Request-Id`（原样作为 requestId 返回）。
 
-错误码：`INVALID_REQUEST` (400) · `UNAUTHORIZED` (401) · `TEXT_TOO_LONG` (413) ·
-`PROVIDER_NOT_FOUND` (400) · `IDEMPOTENCY_CONFLICT` (409) · `RATE_LIMITED` (429) ·
+响应头：`X-Request-Id`、`X-RateLimit-Limit`、`X-RateLimit-Remaining`、`X-RateLimit-Reset`（秒）；429/503 另带 `Retry-After`。
+
+错误体：`{"success":false,"error":{"code":"...","message":"...","retryable":true},"requestId":"..."}`。
+`retryable` 为 true 时按 `Retry-After` 退避重试；`TEXT_TOO_LONG` 额外带 `limit`/`actualLength`/`unit`；参数错误带 `field`。
+
+错误码：`INVALID_REQUEST` (400) · `MALFORMED_JSON` (400) · `UNAUTHORIZED` (401) · `PROVIDER_NOT_FOUND` (400) ·
+`IDEMPOTENCY_CONFLICT` (409) · `TEXT_TOO_LONG` (413) · `BODY_TOO_LARGE` (413，>2 MB) · `RATE_LIMITED` (429) ·
 `UPSTREAM_RATE_LIMITED` (429，上游限流) · `LLM_UPSTREAM_ERROR` (502/503) · `INTERNAL_ERROR` (500)
 
-### GET /healthz 与 GET /api/v1/health
+> 只能从后端服务调用。不要在浏览器、小程序或 App 里直接带 API Key 调用：Key 会暴露，服务也不开放 CORS。
 
-无需鉴权。`/healthz` 返回 `{"ok":true}`，给容器健康检查用；`/api/v1/health` 额外带默认供应商是否启用。
+### 探活：GET /healthz、GET /readyz、GET /api/v1/health
+
+无需鉴权。`/healthz` 返回 `{"ok":true}`，给容器健康检查用；`/readyz` 在数据库可读且默认供应商已启用、配了 Key 时返回 200，否则 503（不调上游）；`/api/v1/health` 带服务版本和默认供应商状态。
 局域网偶发丢包时第一次连接会失败，探活请至少重试 2 次：`curl --retry 2 --retry-connrefused --retry-delay 2`。
 
 ## 管理台

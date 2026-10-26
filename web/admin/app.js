@@ -446,7 +446,8 @@ function renderDocs(main) {
   main.appendChild(el('div', { class: 'card docs' }, [
     el('h2', {}, '这个服务做什么'),
     el('p', {}, '文镕把一段文本交给大模型处理，默认是「翻译成中文并润色」。调用方也可以自己带指令，覆盖默认行为。'),
-    el('p', {}, ['服务地址：', el('code', {}, origin), '。管理台仅供配置，业务调用走下面的接口。'])
+    el('p', {}, ['服务地址：', el('code', {}, origin), '。管理台仅供配置，业务调用走下面的接口。']),
+    el('p', {}, '只能从你的后端服务调用。不要在浏览器、小程序或 App 里直接带 API Key 调用：Key 会暴露给所有用户，本服务也不开放跨域（CORS）。')
   ]));
 
   main.appendChild(el('div', { class: 'card docs' }, [
@@ -461,7 +462,7 @@ function renderDocs(main) {
     el('pre', { class: 'mono' }, curl),
     el('p', {}, '成功时 HTTP 200，正文在 data.result：'),
     el('pre', { class: 'mono' },
-      '{\n  "success": true,\n  "data": {\n    "result": "这是一段示例段落。",\n    "usedPrompt": "default_translate_polish",\n    "model": "agnes-3.0-flash",\n    "usage": { "promptTokens": 42, "completionTokens": 18, "totalTokens": 60 },\n    "latencyMs": 2400\n  },\n  "requestId": "req_7f3a9c2e"\n}')
+      '{\n  "success": true,\n  "data": {\n    "result": "这是一段示例段落。",\n    "usedPrompt": "default_translate_polish",\n    "promptVersion": "pv_3f9a1c2b7d4e",\n    "detectedLang": "en",\n    "targetLang": "zh",\n    "model": "agnes-3.0-flash",\n    "usage": { "promptTokens": 42, "completionTokens": 18, "totalTokens": 60 },\n    "latencyMs": 2400\n  },\n  "requestId": "req_7f3a9c2e"\n}')
   ]));
 
   main.appendChild(el('div', { class: 'card docs' }, [
@@ -471,6 +472,10 @@ function renderDocs(main) {
       el('tbody', {}, [
         el('tr', {}, [el('td', { class: 'mono' }, 'text'), el('td', {}, '是'), el('td', {}, '待处理原文。字符上限默认 20000，另按粗估 token 上限 8000 拦截（中文约一字一 token）。')]),
         el('tr', {}, [el('td', { class: 'mono' }, 'prompt'), el('td', {}, '否'), el('td', {}, '非空时整段替换默认用户提示词。System Prompt 始终生效，调用方不能覆盖。')]),
+        el('tr', {}, [el('td', { class: 'mono' }, 'instruction'), el('td', {}, '否'), el('td', {}, '附加要求（≤1000 字），追加在提示词之后，不替换默认翻译润色。例如「语气更口语」。')]),
+        el('tr', {}, [el('td', { class: 'mono' }, 'targetLang'), el('td', {}, '否'), el('td', {}, '目标语言，默认 zh。可选 zh、zh-Hant、en、ja、ko、fr、de、es、pt、it、ru、vi、th、ar。')]),
+        el('tr', {}, [el('td', { class: 'mono' }, 'glossary'), el('td', {}, '否'), el('td', {}, '术语表，形如 {"token":"词元"}，最多 100 条，模型必须照用。')]),
+        el('tr', {}, [el('td', { class: 'mono' }, 'temperature'), el('td', {}, '否'), el('td', {}, '0～1，默认 0.2。要求稳定输出可设 0。')]),
         el('tr', {}, [el('td', { class: 'mono' }, 'providerId'), el('td', {}, '否'), el('td', {}, '指定某个已启用的供应商；不传则用默认供应商。')])
       ])
     ]),
@@ -478,7 +483,9 @@ function renderDocs(main) {
     el('pre', { class: 'mono' }, '{"text": "We shipped a faster sync.", "prompt": "改写成不超过 20 字的中文标题，只输出标题。"}'),
     el('p', {}, ['此时响应里 ', el('code', {}, 'usedPrompt'), ' 为 ', el('code', {}, 'custom'), '。默认行为则为 ', el('code', {}, 'default_translate_polish'), '。']),
     el('p', {}, ['可选请求头 ', el('code', {}, 'Idempotency-Key'), '：8～128 位字母数字。同一 Key、同一请求内容在 24 小时内重复提交，直接回放上次结果，不再打上游。内容不同则返回 409。']),
-    el('p', {}, ['可选请求头 ', el('code', {}, 'X-Request-Id'), '：传入则原样作为 requestId 返回，方便和调用方日志对齐。'])
+    el('p', {}, ['可选请求头 ', el('code', {}, 'X-Request-Id'), '：传入则原样作为 requestId 返回，方便和调用方日志对齐。响应头也会带上 X-Request-Id。']),
+    el('p', {}, ['响应里的 ', el('code', {}, 'promptVersion'), ' 是实际生效提示词的指纹，后台改了提示词它就会变，用来对账和复现；', el('code', {}, 'detectedLang'), ' 是按文字系统粗判的原文语言，仅供参考。']),
+    el('p', {}, ['限流响应头：', el('code', {}, 'X-RateLimit-Limit'), ' / ', el('code', {}, 'X-RateLimit-Remaining'), ' / ', el('code', {}, 'X-RateLimit-Reset'), '（秒）。'])
   ]));
 
   main.appendChild(el('div', { class: 'card docs' }, [
@@ -486,9 +493,11 @@ function renderDocs(main) {
     el('table', {}, [
       el('thead', {}, el('tr', {}, [el('th', {}, 'HTTP'), el('th', {}, 'error.code'), el('th', {}, '什么时候')])),
       el('tbody', {}, [
-        el('tr', {}, [el('td', {}, '400'), el('td', { class: 'mono' }, 'INVALID_REQUEST'), el('td', {}, '缺 text、JSON 不合法，或请求体过大')]),
+        el('tr', {}, [el('td', {}, '400'), el('td', { class: 'mono' }, 'INVALID_REQUEST'), el('td', {}, '缺 text，或字段类型/取值不对（error.field 指出是哪个字段）')]),
+        el('tr', {}, [el('td', {}, '400'), el('td', { class: 'mono' }, 'MALFORMED_JSON'), el('td', {}, '请求体不是合法 JSON')]),
+        el('tr', {}, [el('td', {}, '413'), el('td', { class: 'mono' }, 'BODY_TOO_LARGE'), el('td', {}, '请求体超过 2 MB')]),
         el('tr', {}, [el('td', {}, '401'), el('td', { class: 'mono' }, 'UNAUTHORIZED'), el('td', {}, '没带 Key，或 Key 无效/已禁用')]),
-        el('tr', {}, [el('td', {}, '413'), el('td', { class: 'mono' }, 'TEXT_TOO_LONG'), el('td', {}, 'text 超过长度上限')]),
+        el('tr', {}, [el('td', {}, '413'), el('td', { class: 'mono' }, 'TEXT_TOO_LONG'), el('td', {}, 'text 超过上限，error 里带 limit / actualLength / unit')]),
         el('tr', {}, [el('td', {}, '400'), el('td', { class: 'mono' }, 'PROVIDER_NOT_FOUND'), el('td', {}, 'providerId 不存在或未启用')]),
         el('tr', {}, [el('td', {}, '409'), el('td', { class: 'mono' }, 'IDEMPOTENCY_CONFLICT'), el('td', {}, '同一个 Idempotency-Key 配了不同的请求内容')]),
         el('tr', {}, [el('td', {}, '429'), el('td', { class: 'mono' }, 'RATE_LIMITED'), el('td', {}, '同一 Key 超过每分钟 60 次，响应带 Retry-After')]),
@@ -498,14 +507,15 @@ function renderDocs(main) {
         el('tr', {}, [el('td', {}, '500'), el('td', { class: 'mono' }, 'INTERNAL_ERROR'), el('td', {}, '服务内部异常，例如还没配默认供应商')])
       ])
     ]),
-    el('p', {}, '失败响应形如 {"success":false,"error":{"code":"...","message":"..."},"requestId":"..."}。排查时把 requestId 对上「调用日志」。'),
+    el('p', {}, '失败响应形如 {"success":false,"error":{"code":"...","message":"...","retryable":true},"requestId":"..."}。retryable 为 true 时按 Retry-After 退避后重试，为 false 时重试也没用。排查时把 requestId 对上「调用日志」。'),
     el('p', {}, '同步接口会一直等到模型返回，常见 2～40 秒，客户端超时建议设到 90 秒以上。')
   ]));
 
   main.appendChild(el('div', { class: 'card docs' }, [
     el('h2', {}, '5. 探活（不需要 Key）'),
     el('p', {}, [el('code', {}, 'GET /healthz'), ' 返回 {"ok":true}，给容器健康检查用。']),
-    el('p', {}, [el('code', {}, 'GET /api/v1/health'), ' 额外带上默认供应商是否启用，给监控用。这两个接口都不做业务处理。']),
+    el('p', {}, [el('code', {}, 'GET /api/v1/health'), ' 额外带上服务版本和默认供应商是否启用，给监控用。']),
+    el('p', {}, [el('code', {}, 'GET /readyz'), ' 就绪检查：数据库可读、默认供应商已启用且配了 Key 才返回 200，否则 503。不调用上游，不产生费用。']),
     el('p', {}, '局域网偶发丢包时，第一次连接会直接失败（curl 退出码 7），几十秒后重试即通。探活请至少重试 2 次，不要把单次失败当成服务挂了：'),
     el('pre', { class: 'mono' }, 'curl --retry 2 --retry-connrefused --retry-delay 2 -fsS ' + location.origin + '/healthz')
   ]));
