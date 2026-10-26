@@ -26,10 +26,12 @@ const { RateLimiter } = require('./rate-limiter.js');
 const { hashApiKey, randomId } = require('./crypto.js');
 const { handleAdminRoute, handleAuthRoute } = require('./admin-routes.js');
 const { createAccAuth } = require('./acc-auth.js');
+const { stripDuplicateGloss, estimateTokens, promptFingerprint } = require('./text-policy.js');
 
 const WEB_DIR = path.join(__dirname, '..', 'web');
 const DEFAULT_PORT = 4090;
 const DEFAULT_MAX_TEXT_LENGTH = 20000;
+const DEFAULT_MAX_TEXT_TOKENS = 8000;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -39,6 +41,12 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon'
 };
+
+function requestIdOf(req) {
+  const incoming = req.headers['x-request-id'];
+  if (typeof incoming === 'string' && /^[A-Za-z0-9._:-]{8,80}$/.test(incoming)) return incoming.slice(0, 80);
+  return randomId('req');
+}
 
 function sendJson(res, status, body, headers = {}) {
   const payload = JSON.stringify(body);
@@ -56,8 +64,8 @@ function sendJson(res, status, body, headers = {}) {
   res.end(payload);
 }
 
-function sendApiError(res, status, code, message, requestId) {
-  sendJson(res, status, { success: false, error: { code, message }, requestId: requestId || null });
+function sendApiError(res, status, code, message, requestId, headers = {}) {
+  sendJson(res, status, { success: false, error: { code, message }, requestId: requestId || null }, headers);
 }
 
 function readJsonBody(req, { maxBytes = 2 * 1024 * 1024 } = {}) {
@@ -200,7 +208,7 @@ function createServer(options = {}) {
   });
 
   async function handleProcess(req, res) {
-    const requestId = randomId('req');
+    const requestId = requestIdOf(req);
     const startedAt = now();
 
     const apiKeyRaw = getBearerToken(req);
@@ -214,9 +222,17 @@ function createServer(options = {}) {
       return;
     }
 
+    const idemKeyRaw = req.headers['idempotency-key'];
+    const idemKey = typeof idemKeyRaw === 'string' ? idemKeyRaw.trim().slice(0, 128) : '';
+    if (idemKey && !/^[A-Za-z0-9._:-]{8,128}$/.test(idemKey)) {
+      sendApiError(res, 400, 'INVALID_REQUEST', 'Idempotency-Key 只能含字母数字、点、下划线、冒号和短横线，长度 8～128', requestId);
+      return;
+    }
+
     const rl = rateLimiter.check(apiKeyRecord.id);
     if (!rl.allowed) {
-      sendApiError(res, 429, 'RATE_LIMITED', '请求过于频繁，请稍后重试', requestId);
+      const retryAfter = Math.max(1, Math.ceil((rl.resetMs || 1000) / 1000));
+      sendApiError(res, 429, 'RATE_LIMITED', '请求过于频繁，请稍后重试', requestId, { 'Retry-After': String(retryAfter) });
       return;
     }
 
@@ -236,9 +252,31 @@ function createServer(options = {}) {
 
     const config = store.getConfig();
     const maxLen = config.max_text_length || DEFAULT_MAX_TEXT_LENGTH;
+    const maxTokens = config.max_text_tokens || DEFAULT_MAX_TEXT_TOKENS;
     if (text.length > maxLen) {
       sendApiError(res, 413, 'TEXT_TOO_LONG', `文本长度超出限制（上限 ${maxLen} 字符）`, requestId);
       return;
+    }
+    const textTokens = estimateTokens(text);
+    if (textTokens > maxTokens) {
+      sendApiError(res, 413, 'TEXT_TOO_LONG', `文本估算超过 ${maxTokens} token（约 ${textTokens}），请拆分后重试`, requestId);
+      return;
+    }
+
+    const requestPrompt = typeof body.prompt === 'string' ? body.prompt : null;
+    const fingerprint = promptFingerprint(config.system_prompt, (requestPrompt && requestPrompt.trim()) || config.default_user_prompt) +
+      ':' + crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);
+
+    if (idemKey) {
+      const cached = store.getIdempotent(idemKey, apiKeyRecord.id);
+      if (cached) {
+        if (cached.fingerprint !== fingerprint) {
+          sendApiError(res, 409, 'IDEMPOTENCY_CONFLICT', '同一个 Idempotency-Key 不能用于不同的请求内容', requestId);
+          return;
+        }
+        sendJson(res, cached.status, Object.assign({}, cached.body, { requestId, idempotentReplay: true }));
+        return;
+      }
     }
 
     let provider;
@@ -265,6 +303,7 @@ function createServer(options = {}) {
 
     try {
       const result = await chatComplete(provider, messages);
+      const content = stripDuplicateGloss(result.content.trim());
       const latencyMs = now() - startedAt;
       store.insertLog({
         id: requestId,
@@ -272,7 +311,7 @@ function createServer(options = {}) {
         providerId: provider.id,
         usedPrompt,
         inputTextLen: text.length,
-        outputTextLen: result.content.length,
+        outputTextLen: content.length,
         status: 'success',
         promptTokens: result.usage.prompt_tokens || null,
         completionTokens: result.usage.completion_tokens || null,
@@ -280,10 +319,10 @@ function createServer(options = {}) {
         latencyMs,
         createdAt: now()
       });
-      sendJson(res, 200, {
+      const payload = {
         success: true,
         data: {
-          result: result.content.trim(),
+          result: content,
           usedPrompt,
           model: result.model,
           usage: {
@@ -294,12 +333,14 @@ function createServer(options = {}) {
           latencyMs
         },
         requestId
-      });
+      };
+      if (idemKey) store.saveIdempotent(idemKey, apiKeyRecord.id, fingerprint, 200, payload);
+      sendJson(res, 200, payload);
     } catch (err) {
       const latencyMs = now() - startedAt;
       const isUpstream = err instanceof LlmUpstreamError;
       const status = isUpstream ? err.status || 502 : 500;
-      const code = isUpstream ? 'LLM_UPSTREAM_ERROR' : 'INTERNAL_ERROR';
+      const code = status === 429 ? 'UPSTREAM_RATE_LIMITED' : isUpstream ? 'LLM_UPSTREAM_ERROR' : 'INTERNAL_ERROR';
       store.insertLog({
         id: requestId,
         apiKeyId: apiKeyRecord.id,
@@ -312,7 +353,9 @@ function createServer(options = {}) {
         latencyMs,
         createdAt: now()
       });
-      sendApiError(res, status, code, err.message, requestId);
+      const headers = {};
+      if (status === 429 || status === 503) headers['Retry-After'] = String(err.retryAfterSec || 30);
+      sendApiError(res, status, code, err.message, requestId, headers);
     }
   }
 

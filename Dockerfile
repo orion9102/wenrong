@@ -21,7 +21,7 @@ USER wenrong
 
 EXPOSE 4090
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4090)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=5 \
+    CMD node -e "const u='http://127.0.0.1:'+(process.env.PORT||4090)+'/healthz';const once=()=>fetch(u,{signal:AbortSignal.timeout(3000)}).then(r=>r.ok);(async()=>{for(let i=0;i<3;i++){try{if(await once())process.exit(0)}catch(e){}if(i<2)await new Promise(r=>setTimeout(r,1000))}process.exit(1)})()"
 
 CMD ["node", "src/server.js"]

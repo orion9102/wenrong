@@ -469,14 +469,16 @@ function renderDocs(main) {
     el('table', {}, [
       el('thead', {}, el('tr', {}, [el('th', {}, '字段'), el('th', {}, '必填'), el('th', {}, '说明')])),
       el('tbody', {}, [
-        el('tr', {}, [el('td', { class: 'mono' }, 'text'), el('td', {}, '是'), el('td', {}, '待处理原文。默认上限 20000 字符，可在「Prompt 配置」里改。')]),
+        el('tr', {}, [el('td', { class: 'mono' }, 'text'), el('td', {}, '是'), el('td', {}, '待处理原文。字符上限默认 20000，另按粗估 token 上限 8000 拦截（中文约一字一 token）。')]),
         el('tr', {}, [el('td', { class: 'mono' }, 'prompt'), el('td', {}, '否'), el('td', {}, '非空时整段替换默认用户提示词。System Prompt 始终生效，调用方不能覆盖。')]),
         el('tr', {}, [el('td', { class: 'mono' }, 'providerId'), el('td', {}, '否'), el('td', {}, '指定某个已启用的供应商；不传则用默认供应商。')])
       ])
     ]),
     el('p', {}, '自定义指令示例（只改标题，不走默认翻译润色）：'),
     el('pre', { class: 'mono' }, '{"text": "We shipped a faster sync.", "prompt": "改写成不超过 20 字的中文标题，只输出标题。"}'),
-    el('p', {}, ['此时响应里 ', el('code', {}, 'usedPrompt'), ' 为 ', el('code', {}, 'custom'), '。默认行为则为 ', el('code', {}, 'default_translate_polish'), '。'])
+    el('p', {}, ['此时响应里 ', el('code', {}, 'usedPrompt'), ' 为 ', el('code', {}, 'custom'), '。默认行为则为 ', el('code', {}, 'default_translate_polish'), '。']),
+    el('p', {}, ['可选请求头 ', el('code', {}, 'Idempotency-Key'), '：8～128 位字母数字。同一 Key、同一请求内容在 24 小时内重复提交，直接回放上次结果，不再打上游。内容不同则返回 409。']),
+    el('p', {}, ['可选请求头 ', el('code', {}, 'X-Request-Id'), '：传入则原样作为 requestId 返回，方便和调用方日志对齐。'])
   ]));
 
   main.appendChild(el('div', { class: 'card docs' }, [
@@ -488,8 +490,11 @@ function renderDocs(main) {
         el('tr', {}, [el('td', {}, '401'), el('td', { class: 'mono' }, 'UNAUTHORIZED'), el('td', {}, '没带 Key，或 Key 无效/已禁用')]),
         el('tr', {}, [el('td', {}, '413'), el('td', { class: 'mono' }, 'TEXT_TOO_LONG'), el('td', {}, 'text 超过长度上限')]),
         el('tr', {}, [el('td', {}, '400'), el('td', { class: 'mono' }, 'PROVIDER_NOT_FOUND'), el('td', {}, 'providerId 不存在或未启用')]),
-        el('tr', {}, [el('td', {}, '429'), el('td', { class: 'mono' }, 'RATE_LIMITED'), el('td', {}, '同一 Key 超过每分钟 60 次')]),
-        el('tr', {}, [el('td', {}, '502'), el('td', { class: 'mono' }, 'LLM_UPSTREAM_ERROR'), el('td', {}, '上游模型失败或超时，可稍后重试')]),
+        el('tr', {}, [el('td', {}, '409'), el('td', { class: 'mono' }, 'IDEMPOTENCY_CONFLICT'), el('td', {}, '同一个 Idempotency-Key 配了不同的请求内容')]),
+        el('tr', {}, [el('td', {}, '429'), el('td', { class: 'mono' }, 'RATE_LIMITED'), el('td', {}, '同一 Key 超过每分钟 60 次，响应带 Retry-After')]),
+        el('tr', {}, [el('td', {}, '429'), el('td', { class: 'mono' }, 'UPSTREAM_RATE_LIMITED'), el('td', {}, '上游模型限流，响应带 Retry-After，稍后重试')]),
+        el('tr', {}, [el('td', {}, '502'), el('td', { class: 'mono' }, 'LLM_UPSTREAM_ERROR'), el('td', {}, '上游模型失败，服务已重试仍失败')]),
+        el('tr', {}, [el('td', {}, '503'), el('td', { class: 'mono' }, 'LLM_UPSTREAM_ERROR'), el('td', {}, '上游超时或暂不可用，响应带 Retry-After')]),
         el('tr', {}, [el('td', {}, '500'), el('td', { class: 'mono' }, 'INTERNAL_ERROR'), el('td', {}, '服务内部异常，例如还没配默认供应商')])
       ])
     ]),
@@ -500,7 +505,9 @@ function renderDocs(main) {
   main.appendChild(el('div', { class: 'card docs' }, [
     el('h2', {}, '5. 探活（不需要 Key）'),
     el('p', {}, [el('code', {}, 'GET /healthz'), ' 返回 {"ok":true}，给容器健康检查用。']),
-    el('p', {}, [el('code', {}, 'GET /api/v1/health'), ' 额外带上默认供应商是否启用，给监控用。这两个接口都不做业务处理。'])
+    el('p', {}, [el('code', {}, 'GET /api/v1/health'), ' 额外带上默认供应商是否启用，给监控用。这两个接口都不做业务处理。']),
+    el('p', {}, '局域网偶发丢包时，第一次连接会直接失败（curl 退出码 7），几十秒后重试即通。探活请至少重试 2 次，不要把单次失败当成服务挂了：'),
+    el('pre', { class: 'mono' }, 'curl --retry 2 --retry-connrefused --retry-delay 2 -fsS ' + location.origin + '/healthz')
   ]));
 }
 

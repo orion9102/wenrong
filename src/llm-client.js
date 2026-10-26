@@ -13,13 +13,26 @@ const https = require('node:https');
 const { URL } = require('node:url');
 
 class LlmUpstreamError extends Error {
-  constructor(message, { status, detail } = {}) {
+  constructor(message, { status, detail, retryable = false, retryAfterSec = null } = {}) {
     super(message);
     this.name = 'LlmUpstreamError';
     this.code = 'LLM_UPSTREAM_ERROR';
     this.status = status || 502;
     this.detail = detail;
+    this.retryable = retryable;
+    this.retryAfterSec = retryAfterSec;
   }
+}
+
+/** 上游 HTTP 状态映射到调用方能用的状态：429/503 不再折进 502，并标记能否重试 */
+function classifyUpstream(status, headers) {
+  const retryAfterRaw = headers && (headers['retry-after'] || headers['Retry-After']);
+  const retryAfterSec = retryAfterRaw && /^\d+$/.test(String(retryAfterRaw)) ? Number(retryAfterRaw) : null;
+  if (status === 401 || status === 403) return { status: 401, retryable: false, retryAfterSec: null };
+  if (status === 429) return { status: 429, retryable: true, retryAfterSec: retryAfterSec || 30 };
+  if (status === 408 || status === 503 || status === 504) return { status: 503, retryable: true, retryAfterSec: retryAfterSec };
+  if (status >= 500) return { status: 502, retryable: true, retryAfterSec: retryAfterSec };
+  return { status: 502, retryable: false, retryAfterSec: null };
 }
 
 function joinUrl(baseUrl, suffix) {
@@ -64,7 +77,7 @@ function postJson(urlString, body, { headers = {}, timeoutMs = 30000 } = {}) {
           } catch (err) {
             parsed = null;
           }
-          resolve({ status: res.statusCode, body: parsed, raw });
+          resolve({ status: res.statusCode, headers: res.headers, body: parsed, raw });
         });
       }
     );
@@ -92,12 +105,12 @@ async function chatComplete(provider, messages) {
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const { status, body, raw } = await postJson(
+      const { status, headers, body, raw } = await postJson(
         url,
         {
           model: provider.model,
           messages,
-          temperature: 0.3
+          temperature: provider.temperature !== undefined ? provider.temperature : 0.2
         },
         {
           headers: { Authorization: 'Bearer ' + provider.apiKey },
@@ -119,12 +132,15 @@ async function chatComplete(provider, messages) {
         (body && body.message) ||
         raw ||
         '上游返回了非预期的响应';
+      const mapped = classifyUpstream(status, headers);
       lastErr = new LlmUpstreamError('上游 LLM 服务返回错误：' + message, {
-        status: status === 401 || status === 403 ? 401 : 502,
+        status: mapped.status,
+        retryable: mapped.retryable,
+        retryAfterSec: mapped.retryAfterSec,
         detail: { httpStatus: status, body }
       });
-      // 鉴权错误不重试
-      if (status === 401 || status === 403) break;
+      // 鉴权错误、以及明确不可重试的 4xx 不重试；429 交给调用方退避
+      if (status === 401 || status === 403 || status === 429 || (status >= 400 && status < 500)) break;
     } catch (err) {
       lastErr = err instanceof LlmUpstreamError ? err : new LlmUpstreamError(err.message);
     }

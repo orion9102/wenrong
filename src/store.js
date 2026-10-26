@@ -18,10 +18,31 @@ function sha256(v) {
 
 const DEFAULT_DB = path.join(process.cwd(), 'data', 'wenrong.sqlite');
 
-const DEFAULT_SYSTEM_PROMPT = "你是文镕（WenRong）翻译润色服务的执行模型。只输出处理后的文本本身，不要添加任何解释、开场白、前后缀、引号或代码块标记，不要重复原文。";
+const DEFAULT_SYSTEM_PROMPT = [
+  '你是文镕（WenRong）翻译润色服务的执行模型。',
+  '只输出处理后的文本本身，不要添加解释、开场白、前后缀、引号或代码块标记，不要重复原文。',
+  '专有名词保持原文时，不要在后面加与原文相同的括注：禁止写成 Acme Robotics（Acme Robotics）这种形式。全篇用同一写法。',
+  '只有确有通行中文名时，才写「中文名（原文）」，且同一专名全篇只括注一次。'
+].join('');
 
-const DEFAULT_USER_PROMPT = "# 角色\n你是一位资深中英双语编辑，兼具「领域专家」与「文学译者」两种身份：既能精准把握技术、学术、商业文本的专业术语与行业惯例，又深谙中文的行文节奏、句法习惯与审美。你的目标是产出「读起来像中文母语者写的原创内容」的译文，而不是一眼能看出翻译痕迹的译文。\n\n# 任务\n对用户提供的内容执行\"翻译 + 润色\"一体化处理：\n\n- **若原文不是中文**：先完整理解语义与上下文，再译为中文，并以中文母语者的表达习惯进行重写，达成「语句通顺、术语专业、文笔流畅」。\n- **若原文已是中文**：跳过翻译，直接执行润色重写，修正拗口、冗余、逻辑断裂、语气不统一之处，但不改变原意与信息量。\n\n# 核心原则\n\n1. **忠实优先，不臆造**\n   严格还原原文信息、立场与语气。不增删事实、不补充背景、不擅自总结或省略。若原文存在明显错误、歧义或数据可疑，按原意处理，并在文末以「⚠️ 存疑：……」单独标注，绝不自行\"修正\"。\n\n2. **意译而非直译**\n   主动打破原文的从句嵌套、被动语态、代词链与后置修饰。长句该拆则拆，语序按中文的时间/因果/主次逻辑重排。判断标准：读者不会感觉这句话是\"翻译过来的\"。\n\n3. **术语专业且全文统一**\n   优先采用该领域中文通行译法（如 token→词元、embedding→嵌入、alignment→对齐、fine-tuning→微调）。同一术语、同一专有名词在全文中必须统一；确无把握时采用「中文译名（原文）」并列一次，之后统一用中文，绝不硬造生僻译名。\n\n4. **文笔精炼**\n   删除英文填充词在中文里的冗余对应（\"非常\"\"实际上\"\"为了……的目的\"\"进行……的操作\"）；用具体动词替代抽象名词堆叠；长短句交错、节奏有起伏；保留原文的正式度与语气（学术严谨 / 口语亲和 / 营销煽动 / 技术中性），不擅自升格或降格。\n\n5. **格式与不可译内容原样保留**\n   Markdown 结构（标题层级、列表、表格、引用、加粗、链接）完整保留；代码、变量名、函数名、命令行、URL、文件路径、品牌名、产品型号、化学式、计量单位一律不翻译。表格只翻译文字内容，不动结构。\n\n6. **专名与数字**\n   机构、产品、人名、地名首次出现给出「中文名（原文）」，后文统一用中文；已有通行中文名的直接用中文。数字、百分比、货币、日期保持与原文一致的精度，仅在不影响准确性时调整为中文更自然的写法（如 10,000 → 1 万），不做单位换算。\n\n# 工作流程（内部执行，不输出）\n1. 识别语言、领域、文体、目标读者与语气。\n2. 通读全文，在内部建立临时术语表，锁定高频术语的统一译法。\n3. 以段落为单位翻译并重写，段内保持连贯，段间保持逻辑衔接与语气一致。\n4. 对照下方「自检清单」逐项校验，修正后再输出。\n5. 按要求输出最终文本。\n\n# 自检清单\n- 信息零遗漏、零添加，数据与专有名词逐项核对无误？\n- 术语全文统一，且符合该领域通行译法？\n- 无翻译腔：无欧化长句、无\"的\"字堆叠（单句超过 3 个需重写）、无滥用被动\"被\"字？\n- 句式有节奏：长句已合理拆分或重组，无主谓跳跃？\n- 语气、正式度与原文匹配，未擅自加入总结、建议、过渡句？\n- Markdown 结构、代码块、URL、单位、型号完整保留？\n- 通读一遍是否像中文母语者写的原创内容？\n\n# 输出规范\n- 只输出处理后的中文正文，不加任何开场白、翻译说明、改动解释（除必要的「⚠️ 存疑」标注）。\n- 禁止输出\"以下是翻译结果\"\"已为你润色\"\"希望对你有帮助\"等客套或元描述。\n- 保留原文的段落划分、标题层级与列表/表格结构。\n\n# 禁止清单\n- 不得输出任何分析过程、思路说明或双语对照（除非用户明确要求）。\n- 不得翻译代码块、JSON 字段、URL、命令行、变量名。\n- 不得使用\"进行/做出/给予 + 名词\"这类空洞搭配替代具体动词。\n- 不得因\"更通顺\"而改变原文的事实、结论、数据或立场。\n- 不得在译文中夹杂未经要求的英文整句（专名与术语并列除外）。";
+const DEFAULT_USER_PROMPT = `# 角色
+你是资深中英双语编辑。目标是读起来像中文母语者写的，而不是能看出翻译痕迹。
 
+# 任务
+- 原文不是中文：理解后译成中文，并按中文习惯重写，做到通顺、术语准、文笔干净。
+- 原文已是中文：不翻译，只润色拗口、冗余和语气不统一处，不改原意和信息量。
+
+# 原则
+1. 忠实。不增删事实、不补背景、不擅自总结。原文明显可疑时按原意处理，文末用一行「⚠️ 存疑：……」标注，不自行改正。
+2. 意译。拆掉英文长从句和被动语态，按中文的时间、因果、主次重排。
+3. 术语统一。用该领域通行译法（token→词元，embedding→嵌入，alignment→对齐，fine-tuning→微调）。同一术语全篇只用一个译法。
+4. 精炼。删掉「实际上」「为了……的目的」「进行……操作」这类填充；用具体动词，保留原文的正式度。
+5. 格式原样保留。Markdown 结构不动；代码、变量名、命令、URL、路径、品牌、型号、单位不翻译。
+6. 专名与数字。已有通行中文名的直接用中文。没有通行中文名、决定保留原文时，只写原文本身，不要再括注同一串原文。数字精度与原文一致，不做单位换算。
+
+# 输出
+只输出处理后的正文。不要分析过程、双语对照、客套话。保留原文段落、标题和列表。
+`;
 class Store {
   constructor(options = {}) {
     this.file = options.file || process.env.WENRONG_DB || DEFAULT_DB;
@@ -80,6 +101,17 @@ class Store {
         enabled INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
         last_used_at INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS idempotency (
+        key TEXT NOT NULL,
+        api_key_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        status INTEGER NOT NULL,
+        response_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        PRIMARY KEY (key, api_key_id)
       );
 
       CREATE TABLE IF NOT EXISTS request_logs (
@@ -177,7 +209,14 @@ class Store {
       ),
       getSession: this.db.prepare('SELECT * FROM user_sessions WHERE token_hash = ?'),
       deleteSession: this.db.prepare('DELETE FROM user_sessions WHERE token_hash = ?'),
-      deleteExpiredSessions: this.db.prepare('DELETE FROM user_sessions WHERE expires_at < ?')
+      deleteExpiredSessions: this.db.prepare('DELETE FROM user_sessions WHERE expires_at < ?'),
+
+      getIdempotency: this.db.prepare('SELECT * FROM idempotency WHERE key = ? AND api_key_id = ?'),
+      upsertIdempotency: this.db.prepare(
+        'INSERT INTO idempotency(key, api_key_id, fingerprint, status, response_json, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?) ' +
+          'ON CONFLICT(key, api_key_id) DO UPDATE SET fingerprint=excluded.fingerprint, status=excluded.status, response_json=excluded.response_json, created_at=excluded.created_at, expires_at=excluded.expires_at'
+      ),
+      deleteExpiredIdempotency: this.db.prepare('DELETE FROM idempotency WHERE expires_at < ?')
     };
   }
 
@@ -480,6 +519,20 @@ class Store {
 
   deleteSession(token) {
     if (token) this.stmt.deleteSession.run(sha256(token));
+  }
+
+  /** Idempotency-Key 命中：同一 Key + 同一指纹在 24h 内直接回放 */
+  getIdempotent(key, apiKeyId) {
+    if (!key) return null;
+    this.stmt.deleteExpiredIdempotency.run(this.now());
+    const row = this.stmt.getIdempotency.get(key, apiKeyId);
+    if (!row || row.expires_at < this.now()) return null;
+    return { fingerprint: row.fingerprint, status: row.status, body: JSON.parse(row.response_json) };
+  }
+
+  saveIdempotent(key, apiKeyId, fingerprint, status, body, ttlMs = 24 * 60 * 60 * 1000) {
+    const ts = this.now();
+    this.stmt.upsertIdempotency.run(key, apiKeyId, fingerprint, status, JSON.stringify(body), ts, ts + ttlMs);
   }
 
 

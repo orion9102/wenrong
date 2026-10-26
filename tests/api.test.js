@@ -354,3 +354,170 @@ test('设置：可创建多个 API Key，各自可调用业务 API；禁用/删�
   server.close();
   store.close();
 });
+
+/** 本地假上游：按 path 返回固定状态，不访问真实模型 */
+function fakeUpstream(handler) {
+  return new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => handler(req, Buffer.concat(chunks).toString('utf8'), res));
+    });
+    s.listen(0, '127.0.0.1', () => resolve(s));
+  });
+}
+
+function withProvider(store, baseUrl, { maxRetries = 0 } = {}) {
+  const rawKey = 'wr_live_' + Math.random().toString(16).slice(2, 10);
+  store.createApiKey('tester', rawKey, hashApiKey(rawKey));
+  store.createProvider({
+    name: 'fake',
+    baseUrl,
+    apiKey: 'sk-test',
+    model: 'fake-model',
+    timeoutMs: 5000,
+    maxRetries,
+    isDefault: true
+  });
+  return rawKey;
+}
+
+test('上游返回 429 时原样透传 UPSTREAM_RATE_LIMITED 与 Retry-After', async () => {
+  const upstream = await fakeUpstream((req, raw, res) => {
+    res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '7' });
+    res.end(JSON.stringify({ error: { message: 'slow down' } }));
+  });
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const rawKey = withProvider(store, 'http://127.0.0.1:' + upstream.address().port);
+  const server = await startServer(store);
+  const res = await request(server, {
+    method: 'POST',
+    path: '/api/v1/process',
+    headers: { Authorization: 'Bearer ' + rawKey },
+    body: { text: 'hello world' }
+  });
+  assert.equal(res.status, 429);
+  assert.equal(res.json.error.code, 'UPSTREAM_RATE_LIMITED');
+  assert.equal(res.headers['retry-after'], '7');
+  server.close();
+  upstream.close();
+  store.close();
+});
+
+test('上游返回 500 时映射为 502 LLM_UPSTREAM_ERROR', async () => {
+  const upstream = await fakeUpstream((req, raw, res) => {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'boom' } }));
+  });
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const rawKey = withProvider(store, 'http://127.0.0.1:' + upstream.address().port);
+  const server = await startServer(store);
+  const res = await request(server, {
+    method: 'POST',
+    path: '/api/v1/process',
+    headers: { Authorization: 'Bearer ' + rawKey },
+    body: { text: 'hello world' }
+  });
+  assert.equal(res.status, 502);
+  assert.equal(res.json.error.code, 'LLM_UPSTREAM_ERROR');
+  assert.match(res.json.error.message, /boom/);
+  server.close();
+  upstream.close();
+  store.close();
+});
+
+test('上游 500 会按 maxRetries 重试后再失败', async () => {
+  let hits = 0;
+  const upstream = await fakeUpstream((req, raw, res) => {
+    hits += 1;
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'boom' } }));
+  });
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const rawKey = withProvider(store, 'http://127.0.0.1:' + upstream.address().port, { maxRetries: 1 });
+  const server = await startServer(store);
+  const res = await request(server, {
+    method: 'POST',
+    path: '/api/v1/process',
+    headers: { Authorization: 'Bearer ' + rawKey },
+    body: { text: 'hello world' }
+  });
+  assert.equal(res.status, 502);
+  assert.equal(hits, 2);
+  server.close();
+  upstream.close();
+  store.close();
+});
+
+test('成功响应去掉「专名（专名）」重复括注，并支持幂等回放', async () => {
+  let hits = 0;
+  const upstream = await fakeUpstream((req, raw, res) => {
+    hits += 1;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        model: 'fake-model',
+        choices: [{ message: { content: 'Acme Robotics（Acme Robotics）宣布融资。' } }],
+        usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 }
+      })
+    );
+  });
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const rawKey = withProvider(store, 'http://127.0.0.1:' + upstream.address().port);
+  const server = await startServer(store);
+  const call = () =>
+    request(server, {
+      method: 'POST',
+      path: '/api/v1/process',
+      headers: { Authorization: 'Bearer ' + rawKey, 'Idempotency-Key': 'idem-key-001', 'X-Request-Id': 'req-from-caller' },
+      body: { text: 'Acme Robotics raised a round.' }
+    });
+  const first = await call();
+  assert.equal(first.status, 200);
+  assert.equal(first.json.requestId, 'req-from-caller');
+  assert.equal(first.json.data.result, 'Acme Robotics宣布融资。');
+  assert.equal(hits, 1);
+
+  const second = await call();
+  assert.equal(second.status, 200);
+  assert.equal(second.json.idempotentReplay, true);
+  assert.equal(hits, 1);
+
+  const conflict = await request(server, {
+    method: 'POST',
+    path: '/api/v1/process',
+    headers: { Authorization: 'Bearer ' + rawKey, 'Idempotency-Key': 'idem-key-001' },
+    body: { text: 'different text' }
+  });
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.json.error.code, 'IDEMPOTENCY_CONFLICT');
+
+  server.close();
+  upstream.close();
+  store.close();
+});
+
+test('本机限流 429 带 Retry-After', async () => {
+  const store = new Store({ file: ':memory:', encryptionKey: 'test' });
+  const rawKey = 'wr_live_ratelimit';
+  store.createApiKey('tester', rawKey, hashApiKey(rawKey));
+  const limiter = new RateLimiter({ windowMs: 60000, maxRequests: 1 });
+  const server = await startServer(store, { rateLimiter: limiter });
+  await request(server, {
+    method: 'POST',
+    path: '/api/v1/process',
+    headers: { Authorization: 'Bearer ' + rawKey },
+    body: { text: 'hello' }
+  });
+  const second = await request(server, {
+    method: 'POST',
+    path: '/api/v1/process',
+    headers: { Authorization: 'Bearer ' + rawKey },
+    body: { text: 'hello' }
+  });
+  assert.equal(second.status, 429);
+  assert.equal(second.json.error.code, 'RATE_LIMITED');
+  assert.ok(Number(second.headers['retry-after']) > 0);
+  server.close();
+  store.close();
+});
