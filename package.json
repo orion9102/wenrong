@@ -1,0 +1,17 @@
+{
+  "name": "wenrong",
+  "version": "1.0.0",
+  "private": true,
+  "description": "文镕：通用翻译润色服务 —— 输入 prompt(可选)+text，输出 LLM 处理后的文本，支持后台配置 Prompt 与 LLM 供应商",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test",
+    "check": "node scripts/syntax-check.js"
+  },
+  "dependencies": {}
+}

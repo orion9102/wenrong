@@ -1,0 +1,20 @@
+services:
+  wenrong:
+    build: .
+    image: wenrong:latest
+    container_name: wenrong
+    restart: unless-stopped
+    ports:
+      - "4090:4090"
+    environment:
+      - PORT=4090
+      - WENRONG_DB=/app/data/wenrong.sqlite
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-change-me-to-a-random-long-string}
+      - DEFAULT_PROVIDER_BASE_URL=${DEFAULT_PROVIDER_BASE_URL:-http://192.168.88.62:3001/}
+      - DEFAULT_PROVIDER_MODEL=${DEFAULT_PROVIDER_MODEL:-claude-sonnet-4-5}
+      - DEFAULT_PROVIDER_API_KEY=${DEFAULT_PROVIDER_API_KEY:-}
+    volumes:
+      - wenrong-data:/app/data
+
+volumes:
+  wenrong-data:
