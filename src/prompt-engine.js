@@ -92,7 +92,7 @@ function buildAddendum({ instruction, targetLang, glossary }) {
   if (targetLang && targetLang !== 'zh') {
     const name = TARGET_LANGS[targetLang];
     parts.push(
-      `# 目标语言\n本次目标语言是 ${name}（${targetLang}）。上文规则中的「中文」一律理解为 ${name}：原文不是 ${name} 时译成 ${name}，已经是 ${name} 时只润色。`
+      `# 目标语言\n本次目标语言是 ${name}（${targetLang}）。上文规则中的「中文」一律理解为 ${name}：原文不是 ${name} 时译成 ${name}，已经是 ${name} 时只润色。\n额外要求：\n- 不要为普通名词、描述性词语加原文括注；只有确有必要的专名首次出现时才可括注一次。\n- 人称与立场词必须与原文一致：原文提到第三方公司/机构时，禁用第一人称表述（如日语「当社」「弊社」），应使用「同社」「この会社」「同企業」等第三方称呼。`
     );
   }
   if (glossary && glossary.length) {

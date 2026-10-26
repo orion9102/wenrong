@@ -40,6 +40,18 @@ const SERVICE_VERSION = (() => {
     return 'unknown';
   }
 })();
+// 构建信息：优先环境变量，其次 git，再次随镜像分发的 build-commit.txt；均无则为 null
+const BUILD_COMMIT = process.env.BUILD_COMMIT || (() => {
+  try {
+    return require('node:child_process').execSync('git -C "' + __dirname + '/.." rev-parse --short HEAD', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch (err) {
+    try {
+      return fs.readFileSync(path.join(__dirname, '..', 'build-commit.txt'), 'utf8').trim() || null;
+    } catch (e2) {
+      return null;
+    }
+  }
+})();
 // 哪些 HTTP 状态值得调用方重试（配合 Retry-After 退避）
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
@@ -87,7 +99,8 @@ function buildOpenApiDocument() {
           totalTokens: { type: 'integer' }
         }
       },
-      latencyMs: { type: 'integer' }
+      latencyMs: { type: 'integer' },
+      upstreamMs: { type: 'integer', description: '其中上游 LLM 调用耗时（毫秒）；latencyMs - upstreamMs 即为本服务自身开销' }
     }
   };
   const errorBody = {
@@ -119,7 +132,7 @@ function buildOpenApiDocument() {
       'X-Request-Id': { schema: { type: 'string' }, description: '本次请求 ID' },
       'X-RateLimit-Limit': { schema: { type: 'integer' }, description: '限流窗口内允许的总次数' },
       'X-RateLimit-Remaining': { schema: { type: 'integer' }, description: '窗口内剩余次数' },
-      'X-RateLimit-Reset': { schema: { type: 'integer' }, description: '窗口重置时间（Unix 秒）' }
+      'X-RateLimit-Reset': { schema: { type: 'integer' }, description: '距限流窗口重置的剩余秒数，随请求真实倒数' }
     }
   });
   return {
@@ -199,7 +212,7 @@ function buildDocsHtml() {
     '</head>',
     '<body>',
     '<script id="api-reference" data-url="/api/v1/openapi.json"></script>',
-    '<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1/dist/browser/standalone.js"></script>',
+    '<script src="/vendor/scalar-standalone.js"></script>',
     '</body>',
     '</html>'
   ].join('\n');
@@ -354,6 +367,7 @@ function createServer(options = {}) {
         sendJson(res, 200, {
           status: 'ok',
           version: SERVICE_VERSION,
+          commit: BUILD_COMMIT,
           uptime: process.uptime(),
           defaultProvider: provider ? { id: provider.id, name: provider.name, enabled: provider.enabled } : null
         });
@@ -371,7 +385,7 @@ function createServer(options = {}) {
           /* 保持 false */
         }
         const ready = checks.database && checks.defaultProvider;
-        sendJson(res, ready ? 200 : 503, { ready, version: SERVICE_VERSION, checks });
+        sendJson(res, ready ? 200 : 503, { ready, version: SERVICE_VERSION, commit: BUILD_COMMIT, checks });
         return;
       }
 
@@ -548,7 +562,9 @@ function createServer(options = {}) {
 
     try {
       const callProvider = temperature !== null ? Object.assign({}, provider, { temperature }) : provider;
+      const upstreamStart = now();
       const result = await chatComplete(callProvider, messages);
+      const upstreamMs = now() - upstreamStart;
       const content = stripDuplicateGloss(result.content.trim());
       const latencyMs = now() - startedAt;
       store.insertLog({
@@ -579,7 +595,8 @@ function createServer(options = {}) {
             completionTokens: result.usage.completion_tokens || 0,
             totalTokens: result.usage.total_tokens || 0
           },
-          latencyMs
+          latencyMs,
+          upstreamMs
         },
         requestId
       };

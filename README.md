@@ -106,11 +106,11 @@ curl -X POST http://localhost:4090/api/v1/process \
 { "text": "Hello world", "targetLang": "fr", "glossary": { "world": "monde" }, "instruction": "保持简短" }
 ```
 
-响应里 `promptVersion` 是实际生效提示词的指纹（后台改提示词后会变），`detectedLang` 是按文字系统粗判的原文语言。
+响应里 `latencyMs` 为总耗时、`upstreamMs` 为其中上游 LLM 调用耗时（两者之差即本服务自身开销）；`promptVersion` 是实际生效提示词的指纹（后台改提示词后会变），`detectedLang` 是按文字系统粗判的原文语言。
 
 可选请求头：`Idempotency-Key`（8～128 位，同一 Key 同一内容 24 小时内回放，内容冲突返回 409）；`X-Request-Id`（原样作为 requestId 返回）。
 
-响应头：`X-Request-Id`、`X-RateLimit-Limit`、`X-RateLimit-Remaining`、`X-RateLimit-Reset`（秒）；429/503 另带 `Retry-After`。
+响应头：`X-Request-Id`、`X-RateLimit-Limit`、`X-RateLimit-Remaining`、`X-RateLimit-Reset`（距窗口重置的剩余秒数，随请求真实倒数）；429/503 另带 `Retry-After`。
 
 错误体：`{"success":false,"error":{"code":"...","message":"...","retryable":true},"requestId":"..."}`。
 `retryable` 为 true 时按 `Retry-After` 退避重试；`TEXT_TOO_LONG` 额外带 `limit`/`actualLength`/`unit`；参数错误带 `field`。
@@ -125,7 +125,7 @@ curl -X POST http://localhost:4090/api/v1/process \
 
 ### 探活：GET /healthz、GET /readyz、GET /api/v1/health
 
-无需鉴权。`/healthz` 返回 `{"ok":true}`，给容器健康检查用；`/readyz` 在数据库可读且默认供应商已启用、配了 Key 时返回 200，否则 503（不调上游）；`/api/v1/health` 带服务版本和默认供应商状态。
+无需鉴权。`/healthz` 返回 `{"ok":true}`，给容器健康检查用；`/readyz` 在数据库可读且默认供应商已启用、配了 Key 时返回 200，否则 503（不调上游）；`/api/v1/health` 带服务版本（`version`）、构建 commit（`commit`，随镜像分发）和默认供应商状态。
 局域网偶发丢包时第一次连接会失败，探活请至少重试 2 次：`curl --retry 2 --retry-connrefused --retry-delay 2`。
 
 ## 管理台

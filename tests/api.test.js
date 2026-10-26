@@ -716,7 +716,7 @@ test('GET /api/v1/docs 返回 Scalar 文档页', async () => {
     const res = await request(server, { method: 'GET', path: '/api/v1/docs' });
     assert.equal(res.status, 200);
     assert.ok(res.raw.includes('data-url="/api/v1/openapi.json"'), '应引用同源 openapi.json');
-    assert.ok(res.raw.includes('@scalar/api-reference'), '应引用 Scalar');
+    assert.ok(res.raw.includes('/vendor/scalar-standalone.js'), '应引用本地打包的 Scalar 脚本（不依赖公网 CDN）');
   } finally {
     server.close();
     store.close();

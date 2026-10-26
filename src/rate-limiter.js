@@ -28,7 +28,9 @@ class RateLimiter {
       return { allowed: false, remaining: 0, resetMs: this.windowMs - (now - arr[0]) };
     }
     arr.push(now);
-    return { allowed: true, remaining: this.maxRequests - arr.length, resetMs: this.windowMs };
+    // resetMs 恒为「距窗口完全重置的剩余毫秒数」：取最早一条记录计算，随时间真实倒数
+    const resetMs = arr.length ? Math.max(1, this.windowMs - (now - arr[0])) : this.windowMs;
+    return { allowed: true, remaining: this.maxRequests - arr.length, resetMs };
   }
 
   /** 定期清理空桶，避免内存无限增长（key 很多但早已不活跃时） */
