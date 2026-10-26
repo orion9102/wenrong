@@ -154,8 +154,8 @@ function renderLogin(root) {
 
 function renderApp(root) {
   root.innerHTML = '';
-  const nav = ['dashboard', 'prompts', 'providers', 'apikeys', 'logs'];
-  const labels = { dashboard: '概览', prompts: 'Prompt 配置', providers: 'LLM 供应商', apikeys: 'API Key', logs: '调用日志' };
+  const nav = ['dashboard', 'playground', 'prompts', 'providers', 'apikeys', 'logs'];
+  const labels = { dashboard: '概览', playground: 'Playground', prompts: 'Prompt 配置', providers: 'LLM 供应商', apikeys: 'API Key', logs: '调用日志' };
 
   const sidebar = el('div', { class: 'sidebar', style: 'position:relative' }, [
     el('div', { class: 'brand' }, ['文镕 WenRong', el('small', {}, '通用翻译润色服务')]),
@@ -175,8 +175,88 @@ function renderApp(root) {
   root.appendChild(sidebar);
   root.appendChild(main);
 
-  const renderers = { dashboard: renderDashboard, prompts: renderPrompts, providers: renderProviders, apikeys: renderApiKeys, logs: renderLogs };
+  const renderers = { dashboard: renderDashboard, playground: renderPlayground, prompts: renderPrompts, providers: renderProviders, apikeys: renderApiKeys, logs: renderLogs };
   renderers[state.route](main);
+}
+
+// ---------------- Playground ----------------
+
+async function renderPlayground(main) {
+  main.innerHTML = '';
+  main.appendChild(el('h1', {}, 'Playground'));
+  main.appendChild(el('p', { class: 'muted' }, '以第三方调用者的视角体验翻译润色效果：输入文本，系统按当前生效的 Prompt 配置处理并返回结果。'));
+
+  const errorBox = el('div', { class: 'error', style: 'display:none' });
+
+  // 供应商选择
+  let providers = [];
+  try {
+    const resp = await api('/providers');
+    providers = resp.data || [];
+  } catch (err) { /* 忽略，用默认 */ }
+  const providerSelect = el('select', {}, [
+    el('option', { value: '' }, '默认供应商'),
+    ...providers.map((p) => el('option', { value: p.id }, p.name + (p.isDefault ? '（默认）' : '') + (p.enabled ? '' : ' · 已停用')))
+  ]);
+
+  const textInput = el('textarea', { placeholder: '输入需要翻译润色的内容…' });
+  const promptInput = el('textarea', { style: 'min-height:60px', placeholder: '自定义 prompt（可选，留空则使用默认的润色+翻译行为）' });
+
+  const resultBox = el('div', { class: 'key-reveal', style: 'display:none; border-color: var(--accent); white-space: pre-wrap;' });
+  const metaLine = el('div', { class: 'muted', style: 'margin-top:8px; font-size:12px;' });
+
+  const submitBtn = el('button', {}, '运行');
+  submitBtn.onclick = async () => {
+    errorBox.style.display = 'none';
+    resultBox.style.display = 'none';
+    metaLine.textContent = '';
+    const text = textInput.value.trim();
+    if (!text) {
+      errorBox.textContent = '请输入要处理的文本';
+      errorBox.style.display = 'block';
+      return;
+    }
+    submitBtn.disabled = true;
+    submitBtn.textContent = '处理中…（最长 60 秒）';
+    try {
+      const body = { text };
+      if (providerSelect.value) body.providerId = providerSelect.value;
+      const customPrompt = promptInput.value.trim();
+      if (customPrompt) body.prompt = customPrompt;
+      const resp = await api('/playground', { method: 'POST', body });
+      resultBox.style.display = 'block';
+      resultBox.textContent = resp.data.result;
+      metaLine.textContent = 'Prompt: ' + resp.data.usedPrompt +
+        ' · 模型: ' + resp.data.model +
+        ' · 延迟: ' + resp.data.latencyMs + ' ms' +
+        ' · Token: ' + resp.data.usage.totalTokens +
+        ' · 请求ID: ' + resp.requestId;
+    } catch (err) {
+      errorBox.textContent = '调用失败：' + err.message;
+      errorBox.style.display = 'block';
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = '运行';
+    }
+  };
+
+  main.appendChild(el('div', { class: 'card' }, [
+    el('h2', {}, '输入'),
+    el('label', {}, 'LLM 供应商'),
+    providerSelect,
+    el('label', {}, '待处理文本'),
+    textInput,
+    el('label', {}, '自定义 Prompt（可选）'),
+    promptInput,
+    errorBox,
+    submitBtn
+  ]));
+  main.appendChild(el('div', { class: 'card' }, [
+    el('h2', {}, '结果'),
+    el('div', { class: 'muted' }, '尚未运行'),
+    resultBox,
+    metaLine
+  ]));
 }
 
 // ---------------- 概览 ----------------

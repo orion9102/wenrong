@@ -16,7 +16,8 @@ const {
   COOKIE_NAME,
   SESSION_TTL_MS
 } = require('./admin-auth.js');
-const { testConnection } = require('./llm-client.js');
+const { chatComplete, testConnection } = require('./llm-client.js');
+const { buildMessages } = require('./prompt-engine.js');
 const { generateApiKey, hashApiKey, maskSecret } = require('./crypto.js');
 
 function readJsonBody(req, { maxBytes = 1024 * 1024 } = {}) {
@@ -275,6 +276,95 @@ async function handleAdminRoute({ req, res, url, store, logger, now, encryptionK
       sendJson(res, 200, { success: true });
       return;
     }
+  }
+
+  // ---- Playground（管理员体验业务效果，走管理员会话而非业务 API Key）----
+
+  if (pathname === '/api/admin/playground' && method === 'POST') {
+    const body = await readJsonBody(req);
+    const text = typeof body.text === 'string' ? body.text : '';
+    if (!text.trim()) {
+      sendErr(sendJson, res, 400, 'INVALID_REQUEST', '缺少必填字段 text');
+      return;
+    }
+    const config = store.getConfig();
+    const maxLen = config.max_text_length || 20000;
+    if (text.length > maxLen) {
+      sendErr(sendJson, res, 413, 'TEXT_TOO_LONG', '文本长度超出限制（上限 ' + maxLen + ' 字符）');
+      return;
+    }
+    let provider;
+    if (body.providerId) {
+      provider = store.getProvider(body.providerId, { includeSecret: true });
+      if (!provider || !provider.enabled) {
+        sendErr(sendJson, res, 400, 'PROVIDER_NOT_FOUND', '指定的供应商不存在或未启用');
+        return;
+      }
+    } else {
+      provider = store.getDefaultProvider({ includeSecret: true });
+      if (!provider || !provider.enabled) {
+        sendErr(sendJson, res, 500, 'INTERNAL_ERROR', '未配置可用的默认 LLM 供应商');
+        return;
+      }
+    }
+    const requestId = 'pg_' + Date.now().toString(16) + Math.random().toString(16).slice(2, 10);
+    const startedAt = now();
+    const { usedPrompt, messages } = buildMessages({
+      systemPrompt: config.system_prompt,
+      defaultUserPrompt: config.default_user_prompt,
+      requestPrompt: typeof body.prompt === 'string' && body.prompt.trim() ? body.prompt : null,
+      text
+    });
+    try {
+      const result = await chatComplete(provider, messages);
+      const latencyMs = now() - startedAt;
+      store.insertLog({
+        id: requestId,
+        apiKeyId: null,
+        providerId: provider.id,
+        usedPrompt,
+        inputTextLen: text.length,
+        outputTextLen: result.content.length,
+        status: 'success',
+        promptTokens: result.usage.prompt_tokens || null,
+        completionTokens: result.usage.completion_tokens || null,
+        totalTokens: result.usage.total_tokens || null,
+        latencyMs,
+        createdAt: now()
+      });
+      sendJson(res, 200, {
+        success: true,
+        data: {
+          result: result.content.trim(),
+          usedPrompt,
+          model: result.model,
+          usage: {
+            promptTokens: result.usage.prompt_tokens || 0,
+            completionTokens: result.usage.completion_tokens || 0,
+            totalTokens: result.usage.total_tokens || 0
+          },
+          latencyMs
+        },
+        requestId
+      });
+    } catch (err) {
+      const latencyMs = now() - startedAt;
+      store.insertLog({
+        id: requestId,
+        apiKeyId: null,
+        providerId: provider.id,
+        usedPrompt,
+        inputTextLen: text.length,
+        status: 'error',
+        errorCode: err.code || 'LLM_UPSTREAM_ERROR',
+        errorMessage: err.message,
+        latencyMs,
+        createdAt: now()
+      });
+      const status = err.status || 502;
+      sendErr(sendJson, res, status, 'LLM_UPSTREAM_ERROR', err.message);
+    }
+    return;
   }
 
   // ---- Logs & Metrics ----
