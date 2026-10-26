@@ -661,7 +661,9 @@ async function renderLogs(main) {
   const listCard = el('div', { class: 'card' }, '加载中…');
   main.appendChild(listCard);
 
-  const { data: logs, pagination } = await api('/logs?limit=50');
+  const res = await api('/logs?limit=50');
+  const logs = res.data || [];
+  const pagination = res.pagination || { total: logs.length };
   listCard.innerHTML = '';
   listCard.appendChild(el('h2', {}, `最近 ${logs.length} 条（共 ${pagination.total} 条）`));
   const table = el('table', {}, [
