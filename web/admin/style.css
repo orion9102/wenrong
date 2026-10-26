@@ -1,14 +1,20 @@
 :root {
-  --bg: #f5f6f8;
+  /* 蜜桃抹茶配色：蜜桃粉 × 抹茶绿 × 奶油底 */
+  --bg: #faf6f0;                      /* 奶油米底 */
+  --bg-blush: #fdeee6;                /* 蜜桃浅粉底（悬停/选中底色） */
   --panel: #ffffff;
-  --panel-border: #e2e5ea;
-  --text: #1f2329;
-  --muted: #6b7280;
-  --accent: #2f6bff;
-  --accent-hover: #2456d6;
-  --danger: #d93036;
-  --success: #1a9e44;
-  --radius: 8px;
+  --panel-border: #f0e4d8;
+  --text: #4a3f35;                    /* 可可棕文字 */
+  --muted: #a08d7c;
+  --accent: #7a9a54;                  /* 抹茶绿 */
+  --accent-hover: #658244;
+  --accent-soft: #eef2e3;             /* 抹茶浅底 */
+  --peach: #f2a48c;                   /* 蜜桃主粉 */
+  --peach-deep: #e58a6d;              /* 蜜桃深粉 */
+  --peach-soft: #fdeee6;
+  --danger: #d96b5f;
+  --success: #7a9a54;
+  --radius: 12px;
 }
 
 * { box-sizing: border-box; }
@@ -16,7 +22,10 @@
 body {
   margin: 0;
   font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-  background: var(--bg);
+  background:
+    radial-gradient(1200px 500px at 110% -10%, rgba(242,164,140,0.16), transparent 60%),
+    radial-gradient(900px 420px at -10% 110%, rgba(122,154,84,0.12), transparent 60%),
+    var(--bg);
   color: var(--text);
   font-size: 14px;
 }
@@ -27,7 +36,7 @@ body {
 
 .sidebar {
   width: 200px;
-  background: var(--panel);
+  background: linear-gradient(180deg, #ffffff 0%, #fdf7f1 100%);
   border-right: 1px solid var(--panel-border);
   padding: 20px 0;
   flex-shrink: 0;
@@ -39,6 +48,7 @@ body {
   font-weight: 600;
   border-bottom: 1px solid var(--panel-border);
   margin-bottom: 12px;
+  color: var(--text);
 }
 .sidebar .brand small { display: block; color: var(--muted); font-size: 11px; font-weight: 400; margin-top: 2px; }
 
@@ -49,9 +59,16 @@ body {
   text-decoration: none;
   cursor: pointer;
   border-left: 3px solid transparent;
+  border-radius: 0 8px 8px 0;
+  margin-right: 10px;
 }
-.sidebar nav a:hover { background: #eef1f6; }
-.sidebar nav a.active { border-left-color: var(--accent); background: #e8efff; color: var(--accent); }
+.sidebar nav a:hover { background: var(--peach-soft); }
+.sidebar nav a.active {
+  border-left-color: var(--peach-deep);
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  font-weight: 500;
+}
 
 .sidebar .logout {
   position: absolute;
@@ -70,21 +87,28 @@ body {
   border-radius: var(--radius);
   padding: 20px;
   margin-bottom: 20px;
+  box-shadow: 0 3px 12px rgba(160,141,124,0.08);
 }
 
 .card h2 { margin: 0 0 14px; font-size: 15px; color: var(--muted); font-weight: 500; }
 
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 20px; }
-.stat-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius); padding: 18px; }
-.stat-card .value { font-size: 26px; font-weight: 600; }
+.stat-card {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 18px;
+  box-shadow: 0 3px 12px rgba(160,141,124,0.06);
+}
+.stat-card .value { font-size: 26px; font-weight: 600; color: var(--accent-hover); }
 .stat-card .label { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
 label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; }
 input[type=text], input[type=password], input[type=number], textarea, select {
   width: 100%;
-  background: #ffffff;
+  background: #fffdf9;
   border: 1px solid var(--panel-border);
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--text);
   padding: 9px 11px;
   font-size: 13px;
@@ -92,20 +116,25 @@ input[type=text], input[type=password], input[type=number], textarea, select {
   margin-bottom: 14px;
 }
 textarea { min-height: 100px; resize: vertical; font-family: ui-monospace, monospace; }
-input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(122,154,84,0.15);
+}
 
 button {
   background: var(--accent);
-  color: white;
+  color: #fff;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 9px 16px;
   font-size: 13px;
   cursor: pointer;
+  transition: background 0.15s ease;
 }
 button:hover { background: var(--accent-hover); }
-button.secondary { background: #e8eaee; color: var(--text); }
-button.secondary:hover { background: #dcDFe5; }
+button.secondary { background: var(--peach-soft); color: var(--peach-deep); }
+button.secondary:hover { background: #fbdccb; }
 button.danger { background: var(--danger); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 
@@ -114,22 +143,29 @@ table th, table td { text-align: left; padding: 8px 10px; border-bottom: 1px sol
 table th { color: var(--muted); font-weight: 500; }
 
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
-.badge.success { background: rgba(26,158,68,0.12); color: var(--success); }
-.badge.error { background: rgba(217,48,54,0.12); color: var(--danger); }
-.badge.default { background: rgba(47,107,255,0.12); color: var(--accent); }
-.badge.disabled { background: rgba(107,114,128,0.12); color: var(--muted); }
+.badge.success { background: rgba(122,154,84,0.15); color: var(--accent-hover); }
+.badge.error { background: rgba(217,107,95,0.14); color: var(--danger); }
+.badge.default { background: rgba(242,164,140,0.2); color: var(--peach-deep); }
+.badge.disabled { background: rgba(160,141,124,0.14); color: var(--muted); }
 
 .toast {
   position: fixed; top: 20px; right: 20px; padding: 12px 18px;
-  background: var(--panel); border: 1px solid var(--panel-border); border-radius: 6px;
-  box-shadow: 0 4px 14px rgba(31,35,41,0.08);
+  background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(160,141,124,0.18);
   z-index: 999;
 }
 .toast.success { border-color: var(--success); }
 .toast.error { border-color: var(--danger); }
 
 .login-wrap { display: flex; align-items: center; justify-content: center; height: 100vh; width: 100%; }
-.login-box { width: 340px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius); padding: 32px; box-shadow: 0 6px 24px rgba(31,35,41,0.06); }
+.login-box {
+  width: 340px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 16px;
+  padding: 32px;
+  box-shadow: 0 10px 32px rgba(160,141,124,0.14);
+}
 .login-box h1 { margin: 0 0 4px; font-size: 20px; }
 .login-box p { color: var(--muted); font-size: 12px; margin: 0 0 24px; }
 .login-box .error { color: var(--danger); font-size: 12px; margin: -6px 0 14px; }
@@ -139,7 +175,7 @@ table th { color: var(--muted); font-weight: 500; }
 .muted { color: var(--muted); }
 .mono { font-family: ui-monospace, monospace; }
 .mt-10 { margin-top: 10px; }
-.key-reveal { background: #f8f9fb; border: 1px solid var(--success); border-radius: 6px; padding: 12px; margin-top: 10px; word-break: break-all; }
+.key-reveal { background: var(--accent-soft); border: 1px solid var(--success); border-radius: 8px; padding: 12px; margin-top: 10px; word-break: break-all; }
 
 /* 登录按钮（统一账号中心跳转链接） */
 a.btn-link {
@@ -150,18 +186,18 @@ a.btn-link {
   color: #fff;
   text-decoration: none;
   padding: 10px 16px;
-  border-radius: 6px;
+  border-radius: 8px;
   font-weight: 500;
 }
 a.btn-link:hover { background: var(--accent-hover); }
-a.btn-link:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+a.btn-link:focus-visible, button:focus-visible { outline: 2px solid var(--peach-deep); outline-offset: 2px; }
 .sidebar .logout a { color: inherit; }
 
 .docs p { line-height: 1.65; margin: 8px 0; }
 .docs pre {
-  background: #f8f9fb;
+  background: #fbf7f1;
   border: 1px solid var(--panel-border);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 12px 14px;
   overflow-x: auto;
   font-size: 12.5px;
@@ -169,5 +205,5 @@ a.btn-link:focus-visible, button:focus-visible { outline: 2px solid var(--accent
   white-space: pre-wrap;
   word-break: break-word;
 }
-.docs code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, monospace; font-size: 12.5px; }
+.docs code { background: var(--peach-soft); padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, monospace; font-size: 12.5px; }
 .docs table { margin-top: 8px; }
