@@ -101,7 +101,13 @@ function readJsonBody(req, { maxBytes = 2 * 1024 * 1024 } = {}) {
 }
 
 function serveStatic(req, res, pathname, staticDir) {
-  const rel = pathname === '/' || pathname === '/admin' || pathname === '/admin/'
+  // /admin 无尾斜杠时重定向到 /admin/，避免浏览器把相对路径 app.js/style.css 解析到根路径
+  if (pathname === '/admin') {
+    res.writeHead(301, { Location: '/admin/' });
+    res.end();
+    return;
+  }
+  const rel = pathname === '/' || pathname === '/admin/'
     ? 'index.html'
     : pathname.replace(/^\/admin\/?/, '') || 'index.html';
   const root = path.resolve(staticDir);
