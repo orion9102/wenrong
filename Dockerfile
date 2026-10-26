@@ -7,6 +7,7 @@ ENV NODE_ENV=production \
     WENRONG_DB=/app/data/wenrong.sqlite
 
 COPY package.json ./
+COPY build-commit.txt* ./
 COPY src ./src
 COPY web ./web
 COPY scripts ./scripts
